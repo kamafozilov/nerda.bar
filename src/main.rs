@@ -46,13 +46,37 @@ fn debug(message: impl FnOnce() -> String) {
     }
 }
 
-/// `NERDA_BAR_ANCHOR="x,y,left,right,scale"` stands in for the menu bar item's place with
-/// `--show`, to open the panel on a display the menu bar isn't active on.
-fn test_anchor() -> Option<ui::Anchor> {
-    let text = std::env::var("NERDA_BAR_ANCHOR").ok()?;
+/// An anchor written "x,y,left,right,scale".
+fn parse_anchor(text: &str) -> Option<ui::Anchor> {
     let parts: Vec<f32> = text.split(',').filter_map(|part| part.trim().parse().ok()).collect();
     let [x, y, left, right, scale] = parts[..] else { return None };
     Some(ui::Anchor { x, y, screen: [left, right], scale })
+}
+
+/// `NERDA_BAR_ANCHOR="x,y,left,right,scale"` stands in for the menu bar item's place with
+/// `--show`, to open the panel on a display the menu bar isn't active on.
+fn test_anchor() -> Option<ui::Anchor> {
+    parse_anchor(&std::env::var("NERDA_BAR_ANCHOR").ok()?)
+}
+
+/// `NERDA_BAR_CYCLE="anchor;anchor;…"` with `NERDA_BAR_DEBUG`: clicks the item under each
+/// anchor in turn, for watching the panel move between displays. With
+/// `NERDA_BAR_CYCLE_CLOSE` it closes between them, as a click elsewhere would.
+fn cycle(handle: rune::AppHandle<Ui>) {
+    let Some(anchors) = std::env::var("NERDA_BAR_CYCLE").ok().filter(|_| std::env::var_os("NERDA_BAR_DEBUG").is_some()) else { return };
+    let anchors: Vec<ui::Anchor> = anchors.split(';').filter_map(parse_anchor).collect();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        for at in (0..anchors.len()).cycle() {
+            let anchor = anchors[at];
+            if std::env::var_os("NERDA_BAR_CYCLE_CLOSE").is_some() {
+                handle.update(ui::close);
+                std::thread::sleep(std::time::Duration::from_millis(700));
+            }
+            handle.update(move |s, tx| ui::toggle(s, anchor, tx));
+            std::thread::sleep(std::time::Duration::from_millis(1300));
+        }
+    });
 }
 
 fn main() {
@@ -115,6 +139,7 @@ fn main() {
             status_item::set_show_used(config.show_used);
             status_item::install(ready_handle.clone(), data_dir.clone(), "claude", "Claude", &status_item::CLAUDE_MARK);
             ready_handle.update(|s, _| s.sync_menu_bar());
+            cycle(ready_handle.clone());
             if show_at_launch {
                 // The menu bar gives a new item its place a moment after it is added.
                 let handle = ready_handle.clone();

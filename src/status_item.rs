@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSStatusBar,
     NSStatusItem, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSAttributedString, NSDictionary, NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSError, NSNull, NSPoint, NSRect, NSSize, NSString, NSURL};
 use rune::AppHandle;
 
 use crate::model::Severity;
@@ -322,6 +322,46 @@ pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, na
     // The target lives as long as the app: AppKit holds it weakly.
     std::mem::forget(target);
     ITEMS.with_borrow_mut(|items| items.push(Item { id: provider, status, menu, shown: None }));
+}
+
+/// Turns off Core Animation's implicit animations on the app's Metal layers.
+///
+/// wgpu draws into a CAMetalLayer it adds under the window's content view. A sublayer, unlike a
+/// view's own layer, animates every change to its size and scale over a quarter of a second.
+/// When the panel moves to a display of another scale, its layer's scale changes, and that
+/// animation played as the panel showed: the contents drawn at half or double size, growing
+/// or shrinking into place. With no actions for those keys, a change lands at once.
+pub fn hold_layers_still() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(metal) = AnyClass::get(c"CAMetalLayer") else { return };
+    let keys = ["bounds", "position", "frame", "contentsScale", "contents", "contentsRect", "anchorPoint", "transform", "hidden", "opacity"];
+    let null = NSNull::null();
+    let values: Vec<&AnyObject> = keys.iter().map(|_| -> &AnyObject { null.as_ref() }).collect();
+    let keys: Vec<Retained<NSString>> = keys.iter().map(|key| NSString::from_str(key)).collect();
+    let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+    let actions = NSDictionary::from_slices(&key_refs, &values);
+
+    fn visit(layer: &AnyObject, metal: &AnyClass, actions: &NSDictionary<NSString, AnyObject>) {
+        // SAFETY: CALayer messages on the main thread; `sublayers` is an NSArray of CALayers or nil.
+        unsafe {
+            let is_metal: bool = msg_send![layer, isKindOfClass: metal];
+            if is_metal {
+                let _: () = msg_send![layer, setActions: actions];
+            }
+            let sublayers: Option<Retained<NSArray<AnyObject>>> = msg_send![layer, sublayers];
+            for sublayer in sublayers.iter().flat_map(|list| list.iter()) {
+                visit(&sublayer, metal, actions);
+            }
+        }
+    }
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        let Some(view) = window.contentView() else { continue };
+        // SAFETY: an NSView's backing layer, or nil.
+        let layer: Option<Retained<AnyObject>> = unsafe { msg_send![&*view, layer] };
+        if let Some(layer) = layer {
+            visit(&layer, metal, &actions);
+        }
+    }
 }
 
 /// Where a provider's item is on screen. Call on the main thread.

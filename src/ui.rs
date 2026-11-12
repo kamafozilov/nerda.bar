@@ -112,6 +112,8 @@ pub struct Ui {
     tick_due: f64,
     /// The pixels per point the view last drew at.
     pub drawn_scale: Cell<f32>,
+    /// The item the panel last opened under.
+    last_anchor: Option<Anchor>,
 }
 
 impl Ui {
@@ -136,6 +138,7 @@ impl Ui {
             blur_closed_at: f64::NEG_INFINITY,
             tick_due: 0.0,
             drawn_scale: Cell::new(0.0),
+            last_anchor: None,
         };
         if demo {
             crate::demo::fill(&mut ui);
@@ -178,12 +181,16 @@ impl Ui {
 }
 
 /// A click on the menu bar item: opens the panel under it, or closes it.
+/// A click on the menu bar item at `anchor`: opens the panel under it, or closes it. With the
+/// panel open under the item on another display's menu bar, it moves there instead.
 pub fn toggle(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
+    let same_item = s.last_anchor.is_some_and(|last| (last.x - anchor.x).abs() < 2.0 && (last.y - anchor.y).abs() < 2.0);
     match s.phase {
-        Phase::Shown => close(s, tx),
+        Phase::Shown if same_item => close(s, tx),
         // A second click before the panel is up takes the first one back.
-        Phase::Opening { .. } => s.phase = Phase::Hidden,
-        _ if tx.clock() - s.blur_closed_at < SAME_CLICK_SECONDS => {}
+        Phase::Opening { .. } if same_item => s.phase = Phase::Hidden,
+        // The click that took focus from the panel, on the item it was open under.
+        Phase::Hidden if same_item && tx.clock() - s.blur_closed_at < SAME_CLICK_SECONDS => {}
         _ => open(s, anchor, tx),
     }
 }
@@ -191,6 +198,12 @@ pub fn toggle(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
 pub fn open(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
     // The panel is there at once, as a menu is: nothing springs into place.
     tx.instant();
+    if s.phase != Phase::Hidden {
+        // Moving to another item: off screen first, so the move is never seen.
+        s.me.hide();
+        s.phase = Phase::Hidden;
+    }
+    s.last_anchor = Some(anchor);
     s.now = time::unix_now();
     s.page = Page::Limits;
     s.hovered = None;
@@ -198,6 +211,10 @@ pub fn open(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
     // Centred under the item, kept on its display.
     let x = (anchor.x - WINDOW_W / 2.0).min(right - WINDOW_W + SHADOW_ROOM - 8.0).max(left - SHADOW_ROOM + 8.0);
     crate::debug(|| format!("opening under {anchor:?} at x {x}, last drawn at scale {}", s.drawn_scale.get()));
+    if !s.demo {
+        // Before the move: a scale change set with actions on would animate.
+        status_item::hold_layers_still();
+    }
     s.me.place(DisplayTarget::Primary, OverlayPlacement::Rect { x, y: anchor.y, width: WINDOW_W, height: WINDOW_H });
     s.send(Command::Opened);
     if s.drawn_scale.get() == anchor.scale {
@@ -457,6 +474,7 @@ mod tests {
     fn a_click_that_closed_the_panel_does_not_reopen_it() {
         let mut rt = runtime();
         let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
+        rt.state.last_anchor = Some(anchor);
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
         rt.frame(1.0 / 60.0);
@@ -496,6 +514,32 @@ mod tests {
         rt.update(|s, tx| { poll(s, 0.03, tx); });
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
+    }
+
+    #[test]
+    fn a_click_on_the_item_on_another_display_moves_the_panel_there() {
+        let mut rt = runtime();
+        rt.update(close);
+        rt.frame(1.0 / 60.0);
+        let here = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
+        let there = Anchor { x: 2900.0, y: 30.0, screen: [1512.0, 3432.0], scale: 2.0 };
+        rt.update(move |s, tx| toggle(s, here, tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.phase, Phase::Shown);
+        // The click on the other item first takes focus from the panel, then arrives.
+        rt.state.demo = false;
+        rt.update(|s, tx| on_focus(s, false, tx));
+        rt.update(move |s, tx| toggle(s, there, tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.phase, Phase::Shown);
+        assert_eq!(rt.state.last_anchor, Some(there));
+        // And with the panel still open, the same.
+        rt.update(move |s, tx| toggle(s, here, tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.phase, rt.state.last_anchor), (Phase::Shown, Some(here)));
+        // A click on the item it is open under closes it.
+        rt.update(move |s, tx| toggle(s, here, tx));
+        assert_eq!(rt.state.phase, Phase::Hidden);
     }
 
     #[test]
