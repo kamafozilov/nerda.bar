@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The nerda N on Nerda browser's tile, in Nerda Bar's colour (blue).
+       No SVG filters: sips, which renders this in scripts/bundle.sh, ignores them.
+       Shadows are stacked translucent copies instead. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1C1C1E"/>
+      <stop offset="1" stop-color="#0E0E0F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile, on Apple's icon grid, with the shadow macOS icons sit on -->
+  <g fill="#000">
+    <rect x="96" y="108" width="832" height="832" rx="189" opacity="0.05"/>
+    <rect x="98" y="106" width="828" height="828" rx="187" opacity="0.07"/>
+    <rect x="100" y="104" width="824" height="824" rx="185" opacity="0.1"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+
+  <!-- The N: two identical blocks side by side; the slant of the first
+       runs on into the notch of the second -->
+  <g fill="#3E9BFF">
+    <polygon points="228,334 366,334 512,480 512,690 301,690 301,553 228,480"/>
+    <polygon points="512,334 650,334 796,480 796,690 585,690 585,553 512,480"/>
+  </g>
+</svg>
