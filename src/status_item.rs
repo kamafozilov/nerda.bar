@@ -327,6 +327,20 @@ pub fn anchor_of(provider: &str) -> Option<Anchor> {
     ITEMS.with_borrow(|items| items.iter().find(|item| item.id == provider).and_then(|item| anchor(&item.status, mtm)))
 }
 
+/// Whether Launch at Login can be switched (the app runs from a bundle), and whether it is on.
+pub fn launch_at_login() -> (bool, bool) {
+    (login_item::available(), login_item::enabled())
+}
+
+pub fn set_launch_at_login(on: bool) -> Result<(), String> {
+    login_item::set(on)
+}
+
+/// Opens a file or folder as Finder would.
+pub fn open(path: &std::path::Path) {
+    open_path(path);
+}
+
 /// Remembers which way percentages read, for the menu's checkmark.
 pub fn set_show_used(show_used: bool) {
     SHOW_USED.set(show_used);

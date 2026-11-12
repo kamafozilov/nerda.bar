@@ -1,20 +1,18 @@
 //! How the panel looks: the provider and its plan, a meter per limit, then usage from the
 //! session logs as totals, a chart and a row per model.
 
-use rune::{Color, Cx, El, Icon, Spring, TextStyle, col, el, icon, row, rule, spacer, text};
+use rune::{Color, Cx, El, Icon, TextStyle, col, el, icon, row, rule, spacer, text};
 
-use crate::model::{self, ExtraUsage, Limit, Severity, Snapshot};
+use crate::model::{self, ExtraUsage, Limit, MenuBarMetric, Severity, Snapshot};
 use crate::stats::{CACHE_READ, CACHE_WRITE_1H, CACHE_WRITE_5M, INPUT, OUTPUT, RangeView};
 use crate::time;
-use crate::ui::{self, PANEL_W, Phase, Range, SHADOW_ROOM, Ui};
+use crate::ui::{self, PANEL_W, Page, Range, SHADOW_ROOM, Ui};
 
 const RADIUS: f32 = 18.0;
 const PAD_X: f32 = 16.0;
 const INNER_W: f32 = PANEL_W - 2.0 * PAD_X;
 const METER_H: f32 = 6.0;
 const CHART_H: f32 = 56.0;
-/// How far above its place the panel starts when it opens.
-const DROP: f32 = 8.0;
 const MODEL_ROWS: usize = 5;
 
 pub static CLAUDE: Icon = Icon {
@@ -26,6 +24,17 @@ static REFRESH: Icon = Icon {
     name: "nerda-refresh",
     view: 24.0,
     body: r#"<path d="M19.5 12 A7.5 7.5 0 1 1 17.3 6.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M19.6 3.6 V7.6 H15.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static SETTINGS: Icon = Icon {
+    name: "nerda-settings",
+    view: 24.0,
+    body: r#"<path d="M4 8 H12 M18 8 H20 M4 16 H6 M12 16 H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="15" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="16" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/>"#,
+};
+static QUIT: Icon = Icon {
+    name: "nerda-quit",
+    view: 24.0,
+    body: r#"<path d="M12 4 V11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7.4 7 A7 7 0 1 0 16.6 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>"#,
 };
 
 /// The colours of one appearance.
@@ -132,7 +141,6 @@ const fn digits(size: f32, weight: f32) -> TextStyle {
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let l = Look::new(cx.system_dark());
-    let shown = s.phase == Phase::Shown;
     let limits = s.limits();
 
     let mut panel = col()
@@ -144,54 +152,46 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         .border(1.0, l.panel_edge)
         .shadow(10.0, 30.0, l.shadow)
         .system_material(s.material)
-        .offset(0.0, if shown { 0.0 } else { -DROP })
-        .offset_motion(Spring::new(0.26, 0.1))
-        .opacity(if shown { 1.0 } else { 0.0 })
-        .opacity_motion(Spring::new(0.14, 0.0))
         // Presses on the panel stay with it; only the empty window around it closes.
         .on_press(|_: &mut Ui| {})
-        .child(header(s, &l, limits.as_ref()));
+        .child(header(&l, limits.as_ref()));
 
-    if let Some(problem) = &s.problem {
-        panel = panel.child(
-            col()
-                .key("problem")
-                .w_full()
-                .px(PAD_X)
-                .pb(12.0)
-                .gap(2.0)
-                .child(text(problem.title()).font(font(12.0, 600.0)).color(l.warning_text))
-                .child(text(problem.detail(s.now)).font(font(11.5, 400.0).lh(15.5)).color(l.dim).w_full().wrap()),
-        );
-    }
-
-    match &limits {
-        Some(snapshot) => {
-            let mut rows = col().key("limits").w_full().px(PAD_X).pb(14.0).gap(14.0);
-            for limit in &snapshot.limits {
-                rows = rows.child(limit_row(&l, limit, s.now, s.config.show_used));
-            }
-            if let Some(extra) = &snapshot.extra {
-                rows = rows.child(extra_row(&l, extra));
-            }
-            panel = panel.child(rows);
+    if s.page == Page::Settings {
+        panel = panel.child(settings(s, &l));
+    } else {
+        if let Some(problem) = &s.problem {
+            panel = panel.child(
+                col()
+                    .key("problem")
+                    .w_full()
+                    .px(PAD_X)
+                    .pb(12.0)
+                    .gap(2.0)
+                    .child(text(problem.title()).font(font(12.0, 600.0)).color(l.warning_text))
+                    .child(text(problem.detail(s.now)).font(font(11.5, 400.0).lh(15.5)).color(l.dim).w_full().wrap()),
+            );
         }
-        None if s.problem.is_none() => {
-            panel = panel.child(row().key("loading").w_full().px(PAD_X).pb(14.0).child(text("Reading your limits…").font(font(12.5, 400.0)).color(l.dim)));
+        match &limits {
+            Some(snapshot) => {
+                let mut rows = col().key("limits").w_full().px(PAD_X).pb(14.0).gap(14.0);
+                for limit in &snapshot.limits {
+                    rows = rows.child(limit_row(&l, limit, s.now, s.config.show_used));
+                }
+                if let Some(extra) = &snapshot.extra {
+                    rows = rows.child(extra_row(&l, extra));
+                }
+                panel = panel.child(rows);
+            }
+            None if s.problem.is_none() => {
+                panel = panel.child(row().key("loading").w_full().px(PAD_X).pb(14.0).child(text("Reading your limits…").font(font(12.5, 400.0)).color(l.dim)));
+            }
+            None => {}
         }
-        None => {}
+        panel = panel.child(rule(1.0, l.stroke)).child(usage(s, &l));
     }
+    panel = panel.child(rule(1.0, l.stroke)).child(footer(s, &l));
 
-    panel = panel.child(rule(1.0, l.stroke)).child(usage(s, &l)).child(rule(1.0, l.stroke)).child(footer(s, &l));
-
-    let root = col()
-        .key("root")
-        .w_full()
-        .h_full()
-        .px(SHADOW_ROOM)
-        .pt(ui::GAP)
-        .on_press_tx(|s: &mut Ui, tx| ui::close(s, tx))
-        .child(panel);
+    let root = col().key("root").w_full().h_full().px(SHADOW_ROOM).pt(ui::GAP).on_press_tx(|s: &mut Ui, tx| ui::close(s, tx)).child(panel);
     // A headless render has no desktop behind the window: stand a wallpaper in for it.
     if s.demo {
         let hex = |s: &str| rune::color::hex(s).unwrap_or(Color::BLACK);
@@ -202,13 +202,12 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     }
 }
 
-fn header(s: &Ui, l: &Look, limits: Option<&Snapshot>) -> El {
+fn header(l: &Look, limits: Option<&Snapshot>) -> El {
     let mut bar = row()
         .key("header")
         .w_full()
         .h(50.0)
-        .pl(PAD_X)
-        .pr(10.0)
+        .px(PAD_X)
         .gap(8.0)
         .center_y()
         .child(icon(&CLAUDE, 18.0).color(l.brand))
@@ -216,20 +215,99 @@ fn header(s: &Ui, l: &Look, limits: Option<&Snapshot>) -> El {
     if let Some(plan) = limits.map(|snapshot| snapshot.plan.as_str()).filter(|plan| !plan.is_empty()) {
         bar = bar.child(row().key("plan").h(18.0).px(6.0).radius(5.0).center().fill(l.chip).child(text(plan).font(font(10.5, 600.0)).color(l.dim)));
     }
-    bar.child(spacer()).child(
+    bar
+}
+
+/// A row of choices where one is on, as AppKit's segmented control.
+fn segments(l: &Look, key: &str) -> El {
+    row().key(key).h(24.0).px(2.0).radius(8.0).fill(l.track).center_y()
+}
+
+fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) + 'static) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .h(20.0)
+        .px(9.0)
+        .radius(6.0)
+        .center()
+        .fill(if on { l.chip.mix(l.text, 0.12) } else { Color::TRANSPARENT })
+        .on_press(pick)
+        .child(text(label).font(font(11.5, if on { 600.0 } else { 500.0 })).color(if on { l.text } else { l.dim }))
+}
+
+/// The settings, in place of the limits and usage.
+fn settings(s: &Ui, l: &Look) -> El {
+    let setting = |name: &'static str, note: &'static str, control: El| {
         row()
-            .key("refresh")
-            .role("button")
-            .label("Refresh")
-            .help("Refresh  ⌘R")
-            .size(28.0, 28.0)
-            .radius(8.0)
-            .center()
-            .hover(l.hover)
-            .press_scale(0.94)
-            .on_press(ui::refresh)
-            .child(icon(&REFRESH, 15.0).color(if s.refreshing { l.faint } else { l.dim })),
-    )
+            .w_full()
+            .gap(12.0)
+            .center_y()
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(2.0)
+                    .child(text(name).font(font(13.0, 500.0)).color(l.text))
+                    .child(text(note).font(font(11.0, 400.0).lh(14.5)).color(l.dim).w_full().wrap()),
+            )
+            .child(control)
+    };
+
+    let mut menu_bar = segments(l, "menu-bar");
+    for (metric, label) in [(MenuBarMetric::Session, "Session"), (MenuBarMetric::Weekly, "Weekly"), (MenuBarMetric::Lowest, "Lowest")] {
+        menu_bar = menu_bar.child(segment(l, format!("menu-bar-{label}"), label, s.config.menu_bar == metric, move |s: &mut Ui| ui::set_menu_bar(s, metric)));
+    }
+    let mut percent = segments(l, "percent");
+    for (used, label) in [(false, "Left"), (true, "Used")] {
+        percent = percent.child(segment(l, format!("percent-{label}"), label, s.config.show_used == used, move |s: &mut Ui| ui::set_show_used(s, used)));
+    }
+
+    let (can_login, login) = s.login;
+    // A switch, as System Settings draws one.
+    let mut switch = row()
+        .key("login")
+        .role("switch")
+        .label("Launch at Login")
+        .size(36.0, 22.0)
+        .radius(11.0)
+        .px(2.0)
+        .center_y()
+        .fill(if login { l.normal } else { l.track })
+        .opacity(if can_login || s.demo { 1.0 } else { 0.45 })
+        .child(el().size(18.0, 18.0).radius(9.0).fill(Color::WHITE));
+    switch = if login { switch.justify_end() } else { switch };
+    if can_login || s.demo {
+        switch = switch.on_press(move |s: &mut Ui| ui::set_launch_at_login(s, !login));
+    }
+
+    let open_file = row()
+        .key("settings-file")
+        .role("button")
+        .label("Open settings file")
+        .h(24.0)
+        .px(10.0)
+        .radius(8.0)
+        .center()
+        .fill(l.track)
+        .hover(l.hover)
+        .on_press_tx(ui::open_settings_file)
+        .child(text("Open").font(font(11.5, 500.0)).color(l.text));
+
+    col()
+        .key("settings-page")
+        .w_full()
+        .px(PAD_X)
+        .pt(2.0)
+        .pb(16.0)
+        .gap(16.0)
+        .child(text("Settings").font(font(13.0, 600.0)).color(l.text))
+        .child(setting("Menu bar shows", "Lowest is the plan-wide limit with the least left.", menu_bar))
+        .child(setting("Percentages", "How much of a limit is left, or how much is used.", percent))
+        .child(setting("Launch at Login", if can_login || s.demo { "Start Nerda Bar when you log in." } else { "Available when run as Nerda Bar.app." }, switch))
+        .child(setting("Settings file", "Refresh interval and the panel's material.", open_file))
+        .child(text(concat!("Nerda Bar ", env!("CARGO_PKG_VERSION"))).font(font(11.0, 400.0)).color(l.faint))
 }
 
 /// A track with its filled share, and a tick where an even pace would have the fill end.
@@ -307,22 +385,9 @@ fn extra_row(l: &Look, extra: &ExtraUsage) -> El {
 }
 
 fn usage(s: &Ui, l: &Look) -> El {
-    let mut ranges = row().key("ranges").h(24.0).px(2.0).radius(8.0).fill(l.track).center_y();
+    let mut ranges = segments(l, "ranges");
     for range in Range::ALL {
-        let on = s.range == range;
-        ranges = ranges.child(
-            row()
-                .key(format!("range-{}", range.label()))
-                .role("button")
-                .label(range.label())
-                .h(20.0)
-                .px(9.0)
-                .radius(6.0)
-                .center()
-                .fill(if on { l.chip.mix(l.text, 0.12) } else { Color::TRANSPARENT })
-                .on_press(move |s: &mut Ui| ui::set_range(s, range))
-                .child(text(range.label()).font(font(11.5, if on { 600.0 } else { 500.0 })).color(if on { l.text } else { l.dim })),
-        );
+        ranges = ranges.child(segment(l, format!("range-{}", range.label()), range.label(), s.range == range, move |s: &mut Ui| ui::set_range(s, range)));
     }
     let mut body = col()
         .key("usage")
@@ -341,19 +406,18 @@ fn usage(s: &Ui, l: &Look) -> El {
         return body.child(text("No Claude Code activity in this period.").key("usage-empty").font(font(12.0, 400.0)).color(l.dim));
     }
 
-    let figure = |value: String, caption: &'static str, end: bool| {
-        let cell = col().gap(1.0).child(text(value).font(digits(22.0, 700.0).tracking(-0.4)).color(l.text)).child(text(caption).font(font(11.0, 400.0)).color(l.dim));
+    // With the pointer on a bar, the figures are that bar's: its hour or its day.
+    let hovered = s.hovered.and_then(|at| view.bars.get(at));
+    let (tokens, cost, tokens_caption, cost_caption) = match hovered {
+        Some(bar) => (model::tokens(bar.tokens), if bar.tokens == 0 { "$0.00".to_owned() } else { model::money(bar.cost) }, format!("tokens · {}", bar.label), "at API prices".to_owned()),
+        None => (model::tokens(view.total()), view.cost_label(), "tokens".to_owned(), "at API prices".to_owned()),
+    };
+    let figure = |key: &'static str, value: String, caption: String, end: bool| {
+        let cell = col().key(key).gap(1.0).child(text(value).font(digits(22.0, 700.0).tracking(-0.4)).color(l.text)).child(text(caption).font(digits(11.0, 400.0)).color(l.dim));
         if end { cell.items_end() } else { cell }
     };
-    body = body.child(
-        row()
-            .key("totals")
-            .w_full()
-            .child(figure(model::tokens(view.total()), "tokens", false))
-            .child(spacer())
-            .child(figure(view.cost_label(), "at API prices", true)),
-    );
-    body = body.child(chart(l, view));
+    body = body.child(row().key("totals").w_full().child(figure("total-tokens", tokens, tokens_caption, false)).child(spacer()).child(figure("total-cost", cost, cost_caption, true)));
+    body = body.child(chart(l, view, s.hovered));
 
     let part = |name: &'static str, count: u64| col().grow(1.0).gap(1.0).child(text(name).font(font(10.5, 400.0)).color(l.faint)).child(text(model::tokens(count)).font(digits(12.0, 500.0)).color(l.text));
     body = body.child(
@@ -368,30 +432,41 @@ fn usage(s: &Ui, l: &Look) -> El {
     body.child(models(l, view))
 }
 
-fn chart(l: &Look, view: &RangeView) -> El {
+fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
     let peak = view.bars.iter().map(|bar| bar.tokens).max().unwrap_or(0).max(1) as f32;
-    let gap = if view.bars.len() <= 7 { 6.0 } else { 2.0 };
-    let mut bars = row().key("chart").w_full().h(CHART_H).gap(gap).items_end();
+    let few = view.bars.len() <= 7;
+    let gap = if few { 6.0 } else { 2.0 };
+    let mut bars = row().key("chart").w_full().h(CHART_H).gap(gap);
     for (at, bar) in view.bars.iter().enumerate() {
         let height = if bar.tokens == 0 { 2.0 } else { (bar.tokens as f32 / peak * CHART_H).max(3.0) };
-        let note = if bar.tokens == 0 { format!("{}: nothing", bar.label) } else { format!("{}: {} tokens, {}", bar.label, model::tokens(bar.tokens), model::money(bar.cost)) };
+        let on = hovered == Some(at);
+        // With a bar picked out, the others step back.
+        let fill = match (bar.tokens == 0, on, hovered.is_some()) {
+            (true, true, _) => l.dim,
+            (true, ..) => l.track,
+            (false, true, _) => l.bar_hover,
+            (false, false, true) => l.bar.alpha(0.35),
+            (false, false, false) => l.bar,
+        };
+        // The whole column answers the pointer, so a short bar is as easy to reach as a tall one.
         bars = bars.child(
-            el().key(format!("bar-{at}"))
+            col()
+                .key(format!("bar-{at}"))
                 .grow(1.0)
                 .min_w(0.0)
-                .h(height)
-                .radius(if view.bars.len() <= 7 { 3.0 } else { 1.5 })
-                .fill(if bar.tokens == 0 { l.track } else { l.bar })
-                .hover(l.bar_hover)
-                .help(note),
+                .h(CHART_H)
+                .justify_end()
+                .on_hover_change(move |s: &mut Ui, inside, _| ui::hover_bar(s, at, inside))
+                .child(el().w_full().h(height).radius(if few { 3.0 } else { 1.5 }).fill(fill)),
         );
     }
     let label = |name: &str| text(name).font(digits(10.0, 400.0)).color(l.faint);
     let mut axis = row().key("axis").w_full();
     if view.axis_per_bar {
         axis = axis.gap(gap);
-        for name in &view.axis {
-            axis = axis.child(row().grow(1.0).min_w(0.0).center().child(label(name)));
+        for (at, name) in view.axis.iter().enumerate() {
+            let name_color = if hovered == Some(at) { l.text } else { l.faint };
+            axis = axis.child(row().grow(1.0).min_w(0.0).center().child(text(name.as_str()).font(digits(10.0, 400.0)).color(name_color)));
         }
     } else {
         axis = axis.justify_between();
@@ -412,7 +487,7 @@ fn models(l: &Look, view: &RangeView) -> El {
             el().key(format!("model-{at}"))
                 .w_full()
                 .h(24.0)
-                .child(el().absolute(0.0, 0.0).size((INNER_W * share).max(6.0), 24.0).radius(6.0).fill(l.chip))
+                .child(el().absolute(0.0, 0.0).size((INNER_W * share).max(3.0), 24.0).radius(if INNER_W * share < 12.0 { 1.5 } else { 6.0 }).fill(l.chip))
                 .child(
                     row()
                         .absolute(0.0, 0.0)
@@ -443,22 +518,31 @@ fn footer(s: &Ui, l: &Look) -> El {
         }
         (None, _) => "Not updated yet".to_owned(),
     };
-    let keycap = |keys: &'static str, action: &'static str| {
+    let button = |key: &'static str, glyph: &'static Icon, name: &'static str, on: bool| {
         row()
-            .gap(5.0)
-            .center_y()
-            .child(row().h(17.0).px(5.0).radius(5.0).center().fill(l.chip).child(text(keys).font(font(10.0, 500.0)).color(l.dim)))
-            .child(text(action).font(font(11.0, 400.0)).color(l.dim))
+            .key(key)
+            .role("button")
+            .label(name)
+            .help(name)
+            .size(26.0, 26.0)
+            .radius(7.0)
+            .center()
+            .fill(if on { l.chip } else { Color::TRANSPARENT })
+            .hover(l.hover)
+            .press_scale(0.94)
+            .child(icon(glyph, 15.0).color(if on { l.text } else { l.dim }))
     };
     row()
         .key("footer")
         .w_full()
-        .h(36.0)
-        .px(PAD_X)
-        .gap(12.0)
+        .h(40.0)
+        .pl(PAD_X)
+        .pr(9.0)
+        .gap(2.0)
         .center_y()
         .child(text(status).key("status").font(digits(11.0, 400.0)).color(if s.problem.is_some() { l.warning_text } else { l.faint }))
         .child(spacer())
-        .child(keycap("⌘R", "Refresh"))
-        .child(keycap("⌘Q", "Quit"))
+        .child(button("refresh", &REFRESH, "Refresh", false).opacity(if s.refreshing { 0.45 } else { 1.0 }).on_press(ui::refresh))
+        .child(button("settings", &SETTINGS, "Settings", s.page == Page::Settings).on_press_tx(ui::toggle_settings))
+        .child(button("quit", &QUIT, "Quit Nerda Bar", false).on_press_tx(|_: &mut Ui, tx| tx.quit()))
 }

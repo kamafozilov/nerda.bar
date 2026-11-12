@@ -23,8 +23,6 @@ pub const WINDOW_W: f32 = PANEL_W + 2.0 * SHADOW_ROOM;
 /// Taller than the panel ever is; the panel takes the height of its content.
 pub const WINDOW_H: f32 = 820.0;
 
-/// How long the panel takes to leave before its window hides.
-const CLOSE_SECONDS: f64 = 0.12;
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
 const SAME_CLICK_SECONDS: f64 = 0.35;
@@ -35,8 +33,13 @@ const TICK_SECONDS: f64 = 15.0;
 pub enum Phase {
     Hidden,
     Shown,
-    /// Leaving; the window hides at `due` on the app clock.
-    Closing { due: f64 },
+}
+
+/// What the panel's body shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Limits,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +89,11 @@ pub struct Ui {
     pub refreshing: bool,
     pub stats: Option<Arc<StatsView>>,
     pub range: Range,
+    /// The chart bar under the pointer: the totals above the chart read for it.
+    pub hovered: Option<usize>,
+    pub page: Page,
+    /// Launch at Login: whether it can be switched here, and whether it is on.
+    pub login: (bool, bool),
     pub phase: Phase,
     /// Unix seconds, as of the last tick: what countdowns count from.
     pub now: i64,
@@ -108,6 +116,9 @@ impl Ui {
             refreshing: false,
             stats: None,
             range: Range::Week,
+            hovered: None,
+            page: Page::Limits,
+            login: (false, false),
             phase: if demo { Phase::Shown } else { Phase::Hidden },
             now: time::unix_now(),
             blur_closed_at: f64::NEG_INFINITY,
@@ -163,7 +174,11 @@ pub fn toggle(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
 }
 
 pub fn open(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
+    // The panel is there at once, as a menu is: nothing springs into place.
+    tx.instant();
     s.now = time::unix_now();
+    s.page = Page::Limits;
+    s.hovered = None;
     let [left, right] = anchor.screen;
     // Centred under the item, kept on its display.
     let x = (anchor.x - WINDOW_W / 2.0).min(right - WINDOW_W + SHADOW_ROOM - 8.0).max(left - SHADOW_ROOM + 8.0);
@@ -180,18 +195,14 @@ pub fn close(s: &mut Ui, tx: &mut Tx) {
     if s.phase != Phase::Shown {
         return;
     }
-    let due = tx.clock() + CLOSE_SECONDS;
-    s.phase = Phase::Closing { due };
-    tx.wake_at(due);
+    tx.instant();
+    s.phase = Phase::Hidden;
+    s.hovered = None;
+    s.me.hide();
 }
 
 pub fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     match s.phase {
-        Phase::Closing { due } if clock >= due => {
-            s.phase = Phase::Hidden;
-            s.me.hide();
-            false
-        }
         // Countdowns move only while the panel shows, so a hidden panel never wakes.
         Phase::Shown if !s.demo && clock >= s.tick_due => {
             s.now = time::unix_now();
@@ -239,6 +250,53 @@ pub fn refresh(s: &mut Ui) {
 
 pub fn set_range(s: &mut Ui, range: Range) {
     s.range = range;
+    s.hovered = None;
+}
+
+/// The pointer entered or left the chart bar at `at`.
+pub fn hover_bar(s: &mut Ui, at: usize, inside: bool) {
+    if inside {
+        s.hovered = Some(at);
+    } else if s.hovered == Some(at) {
+        s.hovered = None;
+    }
+}
+
+/// Switches the panel between the limits and the settings.
+pub fn toggle_settings(s: &mut Ui, tx: &mut Tx) {
+    // A different page, not a change to this one: nothing slides or fades across.
+    tx.instant();
+    s.page = if s.page == Page::Settings { Page::Limits } else { Page::Settings };
+    if s.page == Page::Settings && !s.demo {
+        // Launch at Login can also be switched in System Settings: read it each time.
+        s.login = status_item::launch_at_login();
+    }
+}
+
+pub fn set_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
+    s.config.menu_bar = metric;
+    if !s.demo {
+        config::save(&s.data_dir, &s.config);
+    }
+    s.sync_menu_bar();
+}
+
+pub fn set_launch_at_login(s: &mut Ui, on: bool) {
+    if s.demo {
+        s.login.1 = on;
+        return;
+    }
+    if let Err(reason) = status_item::set_launch_at_login(on) {
+        eprintln!("nerda-bar: launch at login: {reason}");
+    }
+    s.login = status_item::launch_at_login();
+}
+
+pub fn open_settings_file(s: &mut Ui, tx: &mut Tx) {
+    if !s.demo {
+        status_item::open(&s.data_dir.join("config.json"));
+    }
+    close(s, tx);
 }
 
 /// Switches every percentage between what is used and what is left, and remembers it.
@@ -246,13 +304,16 @@ pub fn set_show_used(s: &mut Ui, show_used: bool) {
     s.config.show_used = show_used;
     if !s.demo {
         config::save(&s.data_dir, &s.config);
+        status_item::set_show_used(show_used);
     }
     s.sync_menu_bar();
 }
 
 pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
+        Key::Escape if s.page == Page::Settings => toggle_settings(s, tx),
         Key::Escape => close(s, tx),
+        Key::Command(',') => toggle_settings(s, tx),
         Key::Command('r') => refresh(s),
         Key::Command('q') => tx.quit(),
         Key::Command('w') => close(s, tx),
@@ -291,7 +352,63 @@ mod tests {
         let mut rt = runtime();
         rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
         rt.frame(1.0 / 60.0);
-        assert!(matches!(rt.state.phase, Phase::Closing { .. }));
+        assert_eq!(rt.state.phase, Phase::Hidden);
+    }
+
+    /// The centre of the element with `key`.
+    fn centre(rt: &Runtime<Ui>, key: &str) -> (f32, f32) {
+        let [x, y, w, h] = rt.presented(key).unwrap_or_else(|| panic!("{key} is on screen")).0;
+        (x + w / 2.0, y + h / 2.0)
+    }
+
+    fn click(rt: &mut Runtime<Ui>, key: &str) {
+        let (x, y) = centre(rt, key);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn a_click_on_a_range_switches_the_usage() {
+        let mut rt = runtime();
+        click(&mut rt, "range-Today");
+        assert_eq!(rt.state.range, Range::Today);
+        assert!(rt.presented("bar-23").is_some(), "today has a bar per hour");
+        click(&mut rt, "range-30d");
+        assert_eq!(rt.state.range, Range::Month);
+        assert_eq!(rt.state.phase, Phase::Shown, "a click inside the panel doesn't close it");
+    }
+
+    #[test]
+    fn the_pointer_over_a_bar_reads_that_bar() {
+        let mut rt = runtime();
+        let (x, y) = centre(&rt, "bar-2");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.hovered, Some(2));
+        let (x, y) = centre(&rt, "bar-5");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.hovered, Some(5));
+        let (x, y) = centre(&rt, "footer");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.hovered, None);
+    }
+
+    #[test]
+    fn the_settings_button_swaps_the_body_and_settings_apply() {
+        let mut rt = runtime();
+        click(&mut rt, "settings");
+        assert_eq!(rt.state.page, Page::Settings);
+        assert!(rt.presented("limit-session").is_none() && rt.presented("settings-page").is_some());
+        click(&mut rt, "menu-bar-Weekly");
+        assert_eq!(rt.state.config.menu_bar, model::MenuBarMetric::Weekly);
+        click(&mut rt, "percent-Used");
+        assert!(rt.state.config.show_used);
+        click(&mut rt, "settings");
+        assert_eq!(rt.state.page, Page::Limits);
     }
 
     #[test]
@@ -301,10 +418,10 @@ mod tests {
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
         rt.frame(1.0 / 60.0);
-        assert!(matches!(rt.state.phase, Phase::Closing { .. }));
+        assert_eq!(rt.state.phase, Phase::Hidden);
         rt.update(move |s, tx| toggle(s, anchor, tx));
         rt.frame(1.0 / 60.0);
-        assert!(!matches!(rt.state.phase, Phase::Shown));
+        assert_eq!(rt.state.phase, Phase::Hidden);
     }
 
     #[test]

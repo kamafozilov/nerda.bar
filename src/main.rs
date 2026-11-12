@@ -65,6 +65,8 @@ fn main() {
         on_key: Some(ui::on_key),
         scenes: &[
             ("used", |s| s.config.show_used = true),
+            ("settings", |s| s.page = ui::Page::Settings),
+            ("hover", |s| s.hovered = Some(2)),
             ("today", |s| s.range = Range::Today),
             ("month", |s| s.range = Range::Month),
             ("low", |s| {

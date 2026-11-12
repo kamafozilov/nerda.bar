@@ -53,7 +53,7 @@ Nerda Bar shows how much of your Claude plan is left, and what you used, without
 2. Open it from Applications. The first time, macOS says it can't check the app: open System Settings › Privacy & Security, scroll down and click **Open Anyway**. This is asked once.
 3. Sign in to [Claude Code](https://claude.com/claude-code) if you haven't: Nerda Bar reads that login. The Claude mark and a percentage appear in the menu bar.
 
-A secondary click on the menu bar item has **Launch at Login**. Every release is signed with the same certificate, so macOS treats an update as the same app.
+**Launch at Login** is in the panel's settings. Every release is signed with the same certificate, so macOS treats an update as the same app.
 
 ## What it shows
 
@@ -71,11 +71,12 @@ A secondary click on the menu bar item has **Launch at Login**. Every release is
 - Every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be.
 - Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart, the split into input, output and cache, and a row per model.
 
-Click a limit to switch every percentage between left and used. A secondary click on the menu bar item has Refresh, Launch at Login, the settings file and Quit.
+Move the pointer over the chart and the figures above it read for that hour or day. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, left or used, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
 
 | Key | Action |
 | --- | --- |
 | ⌘R | Refresh now |
+| ⌘, | Settings |
 | esc | Close the panel |
 | ⌘Q | Quit |
 
@@ -90,7 +91,7 @@ Nothing else leaves your Mac.
 
 ## Settings
 
-`~/Library/Application Support/nerda.bar/config.json`, read at launch:
+The panel's settings cover the first two of these. The rest live in `~/Library/Application Support/nerda.bar/config.json`, read at launch:
 
 ```json
 {
