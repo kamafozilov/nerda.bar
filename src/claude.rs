@@ -25,7 +25,7 @@ pub struct Credentials {
     access_token: String,
     /// Unix seconds.
     expires_at: Option<i64>,
-    /// "Max 20x", "Pro"; empty when the login doesn't say.
+    /// "Ultra", "Max", "Pro"; empty when the login doesn't say.
     pub plan: String,
 }
 
@@ -90,16 +90,16 @@ fn parse_credentials(text: &str) -> Option<Credentials> {
     })
 }
 
-/// "max" with the tier "default_claude_max_20x" is "Max 20x"; other plans are their name.
+/// The plan as Claude names it: "max" on the 20x tier is Ultra and on any other tier is Max;
+/// other plans are their own name.
 fn plan_name(subscription: &str, tier: &str) -> String {
+    let tier = tier.to_ascii_lowercase();
+    if subscription.eq_ignore_ascii_case("ultra") || (subscription.eq_ignore_ascii_case("max") && (tier.contains("20x") || tier.contains("ultra"))) {
+        return "Ultra".to_owned();
+    }
     let mut name: String = subscription.trim().to_owned();
     if let Some(first) = name.get_mut(0..1) {
         first.make_ascii_uppercase();
-    }
-    if subscription.eq_ignore_ascii_case("max")
-        && let Some(multiple) = tier.split('_').find(|part| part.len() > 1 && part.ends_with('x') && part[..part.len() - 1].bytes().all(|b| b.is_ascii_digit()))
-    {
-        name = format!("{name} {multiple}");
     }
     name
 }
@@ -205,8 +205,10 @@ mod tests {
 
     #[test]
     fn the_plan_is_named_from_the_login() {
-        assert_eq!(plan_name("max", "default_claude_max_20x"), "Max 20x");
-        assert_eq!(plan_name("max", "default_claude_max_5x"), "Max 5x");
+        assert_eq!(plan_name("max", "default_claude_max_20x"), "Ultra");
+        assert_eq!(plan_name("max", "default_claude_ultra"), "Ultra");
+        assert_eq!(plan_name("ultra", ""), "Ultra");
+        assert_eq!(plan_name("max", "default_claude_max_5x"), "Max");
         assert_eq!(plan_name("max", ""), "Max");
         assert_eq!(plan_name("pro", "default_claude_ai"), "Pro");
         assert_eq!(plan_name("", ""), "");
@@ -217,7 +219,7 @@ mod tests {
         let login = parse_credentials(r#"{"claudeAiOauth":{"accessToken":" abc ","refreshToken":"r","expiresAt":1794478830000,"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"},"mcpOAuth":{}}"#).unwrap();
         assert_eq!(login.access_token, "abc");
         assert_eq!(login.expires_at, Some(1_794_478_830));
-        assert_eq!(login.plan, "Max 20x");
+        assert_eq!(login.plan, "Ultra");
         assert!(parse_credentials(r#"{"claudeAiOauth":{"accessToken":""}}"#).is_none());
         assert!(parse_credentials(r#"{"mcpOAuth":{}}"#).is_none());
     }
@@ -234,7 +236,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let snapshot = parse_usage(&root, "Max 20x".to_owned(), 100);
+        let snapshot = parse_usage(&root, "Ultra".to_owned(), 100);
         let ids: Vec<&str> = snapshot.limits.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["session", "weekly", "weekly-sonnet"]);
         assert_eq!(snapshot.limits[0].used, 24.0);

@@ -19,7 +19,7 @@ pub fn fill(ui: &mut Ui) {
         scoped,
     };
     ui.snapshot = Some(Snapshot {
-        plan: "Max 20x".to_owned(),
+        plan: "Ultra".to_owned(),
         limits: vec![
             limit("session", "Session", 76.0, 6540, 5 * 3600, false),
             limit("weekly", "Weekly", 41.0, 2 * 86_400 + 4 * 3600, 7 * 86_400, false),

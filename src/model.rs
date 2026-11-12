@@ -91,7 +91,7 @@ pub struct ExtraUsage {
 /// A provider's limits as of one successful refresh.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// "Max 20x", "Pro"; empty when the provider doesn't say.
+    /// "Ultra", "Pro"; empty when the provider doesn't say.
     pub plan: String,
     pub limits: Vec<Limit>,
     pub extra: Option<ExtraUsage>,
