@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn the_panel_shows_at_once_on_a_display_of_the_scale_it_was_drawn_at() {
         let mut rt = runtime();
-        rt.update(|s, tx| close(s, tx));
+        rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
         rt.update(move |s, tx| toggle(s, anchor, tx));
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn on_a_display_of_another_scale_the_panel_waits_to_be_drawn_at_it() {
         let mut rt = runtime();
-        rt.update(|s, tx| close(s, tx));
+        rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
         rt.update(move |s, tx| toggle(s, anchor, tx));
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn a_display_that_never_redraws_still_gets_the_panel() {
         let mut rt = runtime();
-        rt.update(|s, tx| close(s, tx));
+        rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
         rt.update(move |s, tx| toggle(s, anchor, tx));
