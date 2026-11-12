@@ -1,16 +1,19 @@
-//! How the panel looks: the provider and its plan, a meter per limit, then usage from the
-//! session logs as totals, a chart and a row per model.
+//! How the panel looks: a rail of tabs, and the tab beside it. The Agents tab has the provider
+//! and its plan, a meter per limit, then usage from the session logs as totals, a chart and a
+//! row per model; this Mac's tabs are in `system_view`.
 
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, icon, row, rule, spacer, text};
 
+use crate::config::MenuStyle;
 use crate::model::{self, ExtraUsage, Limit, MenuBarMetric, Severity, Snapshot};
 use crate::stats::{CACHE_READ, CACHE_WRITE_1H, CACHE_WRITE_5M, INPUT, OUTPUT, RangeView};
+use crate::system_view;
 use crate::time;
-use crate::ui::{self, PANEL_W, Page, Range, SHADOW_ROOM, Ui};
+use crate::ui::{self, CONTENT_W, PANEL_W, Page, RAIL_W, Range, SHADOW_ROOM, Tab, Ui};
 
 const RADIUS: f32 = 18.0;
-const PAD_X: f32 = 16.0;
-const INNER_W: f32 = PANEL_W - 2.0 * PAD_X;
+pub(crate) const PAD_X: f32 = 16.0;
+pub(crate) const INNER_W: f32 = CONTENT_W - 2.0 * PAD_X;
 const METER_H: f32 = 6.0;
 const CHART_H: f32 = 56.0;
 const MODEL_ROWS: usize = 5;
@@ -31,6 +34,22 @@ static SETTINGS: Icon = Icon {
     view: 24.0,
     body: r#"<path d="M4 8 H12 M18 8 H20 M4 16 H6 M12 16 H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="15" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="16" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/>"#,
 };
+static AGENTS: Icon = Icon {
+    name: "nerda-agents",
+    view: 24.0,
+    body: r#"<path d="M12 3.5 C12.5 8.2 15.8 11.5 20.5 12 C15.8 12.5 12.5 15.8 12 20.5 C11.5 15.8 8.2 12.5 3.5 12 C8.2 11.5 11.5 8.2 12 3.5 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>"#,
+};
+static CPU: Icon = Icon {
+    name: "nerda-cpu",
+    view: 24.0,
+    body: r#"<path d="M8 6 H16 A2 2 0 0 1 18 8 V16 A2 2 0 0 1 16 18 H8 A2 2 0 0 1 6 16 V8 A2 2 0 0 1 8 6 Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 10 H14 V14 H10 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 3 V6 M14 3 V6 M10 18 V21 M14 18 V21 M3 10 H6 M3 14 H6 M18 10 H21 M18 14 H21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+static MEMORY: Icon = Icon {
+    name: "nerda-memory",
+    view: 24.0,
+    body: r#"<path d="M4.5 6.5 H19.5 A1.5 1.5 0 0 1 21 8 V15 H3 V8 A1.5 1.5 0 0 1 4.5 6.5 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M7 9.5 V12 M10.5 9.5 V12 M14 9.5 V12 M17.5 9.5 V12 M6 15 V18 M9 15 V18 M12 15 V18 M15 15 V18 M18 15 V18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"#,
+};
+
 static QUIT: Icon = Icon {
     name: "nerda-quit",
     view: 24.0,
@@ -39,33 +58,38 @@ static QUIT: Icon = Icon {
 
 /// The colours of one appearance.
 #[derive(Clone, Copy)]
-struct Look {
-    text: Color,
-    dim: Color,
-    faint: Color,
-    hover: Color,
-    stroke: Color,
-    track: Color,
-    tick: Color,
-    chip: Color,
+pub(crate) struct Look {
+    pub text: Color,
+    pub dim: Color,
+    pub faint: Color,
+    pub hover: Color,
+    pub stroke: Color,
+    pub track: Color,
+    pub tick: Color,
+    pub chip: Color,
     /// Behind a group of rows.
-    card: Color,
-    panel: Color,
-    panel_edge: Color,
-    shadow: Color,
-    bar: Color,
-    bar_hover: Color,
-    normal: Color,
-    warning: Color,
-    critical: Color,
+    pub card: Color,
+    pub panel: Color,
+    pub panel_edge: Color,
+    pub shadow: Color,
+    pub bar: Color,
+    pub bar_hover: Color,
+    pub normal: Color,
+    pub warning: Color,
+    pub critical: Color,
     /// Warning and critical as text, darker in light mode where the fills are too pale to read.
-    warning_text: Color,
-    critical_text: Color,
-    brand: Color,
+    pub warning_text: Color,
+    pub critical_text: Color,
+    pub brand: Color,
+    /// Status: all is well (memory pressure).
+    pub good: Color,
+    /// The chart series, in this fixed order: blue, teal, purple. Checked for colour-blind
+    /// separation and against the panel in both appearances.
+    pub series: [Color; 3],
 }
 
 impl Look {
-    fn new(dark: bool) -> Look {
+    pub(crate) fn new(dark: bool) -> Look {
         let (white, black) = (Color::WHITE, Color::BLACK);
         let hex = |s: &str| rune::color::hex(s).unwrap_or(Color::WHITE);
         if dark {
@@ -90,6 +114,8 @@ impl Look {
                 warning_text: hex("#ff9f0a"),
                 critical_text: hex("#ff453a"),
                 brand: hex("#d97757"),
+                good: hex("#30d158"),
+                series: [hex("#0a84ff"), hex("#1aa3b5"), hex("#bf5af2")],
             }
         } else {
             Look {
@@ -113,6 +139,8 @@ impl Look {
                 warning_text: hex("#b25e00"),
                 critical_text: hex("#d6001a"),
                 brand: hex("#d97757"),
+                good: hex("#28a745"),
+                series: [hex("#007aff"), hex("#1597ab"), hex("#a64fe0")],
             }
         }
     }
@@ -134,12 +162,12 @@ impl Look {
     }
 }
 
-const fn font(size: f32, weight: f32) -> TextStyle {
+pub(crate) const fn font(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight)
 }
 
 /// Digits that keep their width, so a changing number doesn't shift what is beside it.
-const fn digits(size: f32, weight: f32) -> TextStyle {
+pub(crate) const fn digits(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).features("tnum")
 }
 
@@ -149,21 +177,18 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     s.drawn_scale.set(cx.env().scale);
     let limits = s.limits();
 
-    let mut panel = col()
-        .key("panel")
-        .w(PANEL_W)
-        .radius(RADIUS)
-        .continuous_corners()
-        .fill(l.panel)
-        .border(1.0, l.panel_edge)
-        .shadow(10.0, 30.0, l.shadow)
-        .system_material(s.material)
-        // Presses on the panel stay with it; only the empty window around it closes.
-        .on_press(|_: &mut Ui| {})
-        .child(header(&l, limits.as_ref()));
+    let mut panel = col().key("content").w(CONTENT_W).child(match (s.page, s.tab) {
+        (Page::Settings, _) => settings_header(&l),
+        (_, Tab::Agents) => header(&l, limits.as_ref()),
+        (_, tab) => system_view::header(s, &l, tab),
+    });
 
     if s.page == Page::Settings {
         panel = panel.child(settings(s, &l));
+    } else if s.tab == Tab::Cpu {
+        panel = panel.child(system_view::cpu(s, &l));
+    } else if s.tab == Tab::Memory {
+        panel = panel.child(system_view::memory(s, &l));
     } else {
         if let Some(problem) = &s.problem {
             panel = panel.child(
@@ -197,7 +222,26 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     }
     panel = panel.child(rule(1.0, l.stroke)).child(footer(s, &l));
 
-    let root = col().key("root").w_full().h_full().px(SHADOW_ROOM).pt(ui::GAP).on_press_tx(|s: &mut Ui, tx| ui::close(s, tx)).child(panel);
+    let tabs = s.tabs();
+    // One tab needs no rail: the panel is the tab alone, as it was before there were tabs.
+    let panel = if tabs.len() > 1 {
+        row().w(PANEL_W).child(rail(s, &l, &tabs)).child(el().key("rail-edge").w(1.0).self_stretch().fill(l.stroke)).child(panel)
+    } else {
+        row().w(CONTENT_W).child(panel)
+    };
+    let panel = panel
+        .key("panel")
+        .items_start()
+        .radius(RADIUS)
+        .continuous_corners()
+        .fill(l.panel)
+        .border(1.0, l.panel_edge)
+        .shadow(10.0, 30.0, l.shadow)
+        .system_material(s.material)
+        // Presses on the panel stay with it; only the empty window around it closes.
+        .on_press(|_: &mut Ui| {});
+
+    let root = col().key("root").w_full().h_full().px(SHADOW_ROOM).pt(ui::GAP).items_center().on_press_tx(|s: &mut Ui, tx| ui::close(s, tx)).child(panel);
     // A headless render has no desktop behind the window: stand a wallpaper in for it.
     if s.demo {
         let hex = |s: &str| rune::color::hex(s).unwrap_or(Color::BLACK);
@@ -206,6 +250,52 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     } else {
         root
     }
+}
+
+/// The tabs, one above the other: each its icon and its name, the open one on a chip.
+fn rail(s: &Ui, l: &Look, tabs: &[Tab]) -> El {
+    let mut rail = col().key("rail").w(RAIL_W - 1.0).self_stretch().px(6.0).py(8.0).gap(2.0);
+    for (at, &tab) in tabs.iter().enumerate() {
+        let on = s.page == Page::Tab && s.tab == tab;
+        let glyph = match tab {
+            Tab::Agents => &AGENTS,
+            Tab::Cpu => &CPU,
+            Tab::Memory => &MEMORY,
+        };
+        rail = rail.child(
+            col()
+                .key(format!("tab-{}", tab.id()))
+                .role("tab")
+                .label(tab.label())
+                .help(format!("{} (⌘{})", tab.label(), at + 1))
+                .w_full()
+                .h(50.0)
+                .radius(10.0)
+                .continuous_corners()
+                .center()
+                .gap(4.0)
+                .fill(if on { l.chip } else { Color::TRANSPARENT })
+                .hover(l.hover)
+                .press_scale(0.96)
+                .on_press_tx(move |s: &mut Ui, tx| ui::set_tab(s, tab, tx))
+                .child(icon(glyph, 18.0).color(if on { l.normal } else { l.dim }))
+                .child(text(tab.label()).font(font(10.5, if on { 600.0 } else { 500.0 })).color(if on { l.text } else { l.dim })),
+        );
+    }
+    rail
+}
+
+/// The title row of a tab: its name, and a chip saying what it is about.
+pub(crate) fn title_bar(l: &Look, title: &str, chip: Option<&str>) -> El {
+    let mut bar = row().key("header").w_full().h(50.0).px(PAD_X).gap(8.0).center_y().child(text(title).font(font(15.0, 600.0)).color(l.text));
+    if let Some(chip) = chip.filter(|chip| !chip.is_empty()) {
+        bar = bar.child(row().key("chip").h(18.0).px(6.0).radius(5.0).center().fill(l.chip).child(text(chip).font(font(10.5, 600.0)).color(l.dim)));
+    }
+    bar
+}
+
+fn settings_header(l: &Look) -> El {
+    title_bar(l, "Settings", None).child(spacer()).child(text(concat!("Nerda Bar ", env!("CARGO_PKG_VERSION"))).font(digits(11.0, 400.0)).color(l.faint))
 }
 
 fn header(l: &Look, limits: Option<&Snapshot>) -> El {
@@ -225,11 +315,11 @@ fn header(l: &Look, limits: Option<&Snapshot>) -> El {
 }
 
 /// A row of choices where one is on, as AppKit's segmented control.
-fn segments(l: &Look, key: &str) -> El {
+pub(crate) fn segments(l: &Look, key: &str) -> El {
     row().key(key).h(24.0).px(2.0).radius(8.0).fill(l.track).center_y()
 }
 
-fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) + 'static) -> El {
+pub(crate) fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) + 'static) -> El {
     row()
         .key(key)
         .role("button")
@@ -244,7 +334,7 @@ fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) 
 }
 
 /// A switch, as System Settings draws one.
-fn switch(l: &Look, key: &str, label: &str, on: bool, enabled: bool, flip: impl Fn(&mut Ui) + 'static) -> El {
+pub(crate) fn switch(l: &Look, key: &str, label: &str, on: bool, enabled: bool, flip: impl Fn(&mut Ui) + 'static) -> El {
     let mut switch = row()
         .key(key)
         .role("switch")
@@ -300,36 +390,39 @@ fn settings(s: &Ui, l: &Look) -> El {
         .on_press_tx(ui::open_settings_file)
         .child(text("Open").font(font(11.5, 500.0)).color(l.text));
 
-    let group = col()
-        .key("settings-group")
-        .w_full()
-        .radius(10.0)
-        .fill(l.card)
-        .child(setting("Menu bar shows", menu_bar))
-        .child(rule(1.0, l.stroke).mx(12.0))
-        .child(setting("Percentages", percent))
-        .child(rule(1.0, l.stroke).mx(12.0))
-        .child(setting("Model limits", models_switch))
-        .child(rule(1.0, l.stroke).mx(12.0))
-        .child(setting("Launch at Login", login_switch))
-        .child(rule(1.0, l.stroke).mx(12.0))
-        .child(setting("Settings file", open_file));
+    // A group of settings under its caption, the rows split by hairlines.
+    let group = |key: &'static str, caption: &'static str, rows: Vec<El>| {
+        let mut card = col().key(key).w_full().radius(10.0).fill(l.card);
+        for (at, setting) in rows.into_iter().enumerate() {
+            if at > 0 {
+                card = card.child(rule(1.0, l.stroke).mx(12.0));
+            }
+            card = card.child(setting);
+        }
+        col().w_full().gap(6.0).child(text(caption).font(font(11.0, 600.0)).color(l.dim).px(12.0)).child(card)
+    };
+    let module = |tab: Tab| {
+        let module = s.module(tab).unwrap_or_default();
+        let mut styles = segments(l, &format!("{}-menu-bar", tab.id()));
+        for style in MenuStyle::ALL {
+            styles = styles.child(segment(l, format!("{}-menu-bar-{}", tab.id(), style.label()), style.label(), module.menu_bar == style, move |s: &mut Ui| ui::set_module_menu_bar(s, tab, style)));
+        }
+        let shown = module.tab;
+        let tab_switch = switch(l, &format!("{}-tab", tab.id()), &format!("{} tab", tab.label()), shown, true, |_: &mut Ui| {})
+            .on_press_tx(move |s: &mut Ui, tx| ui::set_module_tab(s, tab, !shown, tx));
+        vec![setting("Menu bar", styles), setting("Tab in the panel", tab_switch)]
+    };
 
     col()
         .key("settings-page")
         .w_full()
         .px(PAD_X)
         .pb(14.0)
-        .gap(10.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(text("Settings").font(font(13.0, 600.0)).color(l.text))
-                .child(spacer())
-                .child(text(concat!("Nerda Bar ", env!("CARGO_PKG_VERSION"))).font(digits(11.0, 400.0)).color(l.faint)),
-        )
-        .child(group)
+        .gap(14.0)
+        .child(group("settings-group", "Claude", vec![setting("Menu bar shows", menu_bar), setting("Percentages", percent), setting("Model limits", models_switch)]))
+        .child(group("settings-cpu", "CPU", module(Tab::Cpu)))
+        .child(group("settings-memory", "Memory", module(Tab::Memory)))
+        .child(group("settings-general", "General", vec![setting("Launch at Login", login_switch), setting("Settings file", open_file)]))
 }
 
 /// A track with its filled share, and a tick where an even pace would have the fill end.
@@ -566,7 +659,9 @@ fn models(l: &Look, view: &RangeView) -> El {
 }
 
 fn footer(s: &Ui, l: &Look) -> El {
+    let booted = s.system.as_ref().and_then(|view| view.machine.booted_at);
     let status = match (&s.snapshot, s.refreshing) {
+        _ if s.tab.is_system() && s.page == Page::Tab => booted.map_or_else(String::new, |at| format!("Up {}", time::span(s.now - at))),
         (_, true) => "Updating…".to_owned(),
         (Some(snapshot), _) => {
             let age = s.now - snapshot.fetched_at;
@@ -596,9 +691,10 @@ fn footer(s: &Ui, l: &Look) -> El {
         .pr(9.0)
         .gap(2.0)
         .center_y()
-        .child(text(status).key("status").font(digits(11.0, 400.0)).color(if s.problem.is_some() { l.warning_text } else { l.faint }))
+        .child(text(status).key("status").font(digits(11.0, 400.0)).color(if s.problem.is_some() && s.tab == Tab::Agents { l.warning_text } else { l.faint }))
         .child(spacer())
-        .child(button("refresh", &REFRESH, "Refresh", false).opacity(if s.refreshing { 0.45 } else { 1.0 }).on_press(ui::refresh))
+        // This Mac's measures read on their own: only the limits have something to refresh.
+        .child(if s.tab == Tab::Agents { button("refresh", &REFRESH, "Refresh", false).opacity(if s.refreshing { 0.45 } else { 1.0 }).on_press(ui::refresh) } else { el() })
         .child(button("settings", &SETTINGS, "Settings", s.page == Page::Settings).on_press_tx(ui::toggle_settings))
         .child(button("quit", &QUIT, "Quit Nerda Bar", false).on_press_tx(|_: &mut Ui, tx| tx.quit()))
 }

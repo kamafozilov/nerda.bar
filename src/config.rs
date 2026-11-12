@@ -21,11 +21,56 @@ pub struct Config {
     pub refresh_minutes: u32,
     /// "glass" (Liquid Glass on macOS 26 and later) or "popover" (frosted vibrancy).
     pub material: String,
+    /// The CPU's own menu bar item and tab.
+    pub cpu: Module,
+    /// Memory's own menu bar item and tab.
+    pub memory: Module,
+}
+
+/// How one of this Mac's measures shows: its menu bar item, and its tab in the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Module {
+    pub menu_bar: MenuStyle,
+    pub tab: bool,
+}
+
+impl Default for Module {
+    fn default() -> Self {
+        Self { menu_bar: MenuStyle::Off, tab: true }
+    }
+}
+
+/// How a measure reads in the menu bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MenuStyle {
+    /// No item.
+    Off,
+    /// Its name and a percentage: "CPU 8%".
+    Text,
+    /// A ring filled to the share, and the percentage.
+    Ring,
+    /// The last half minute as bars, and the percentage.
+    Graph,
+}
+
+impl MenuStyle {
+    pub const ALL: [MenuStyle; 4] = [MenuStyle::Off, MenuStyle::Text, MenuStyle::Ring, MenuStyle::Graph];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuStyle::Off => "Off",
+            MenuStyle::Text => "Text",
+            MenuStyle::Ring => "Ring",
+            MenuStyle::Graph => "Graph",
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { menu_bar: MenuBarMetric::Session, menu_bar_models: true, show_used: false, refresh_minutes: 5, material: "popover".to_owned() }
+        Self { menu_bar: MenuBarMetric::Session, menu_bar_models: true, show_used: false, refresh_minutes: 5, material: "popover".to_owned(), cpu: Module::default(), memory: Module::default() }
     }
 }
 
@@ -82,6 +127,14 @@ mod tests {
         assert_eq!(config.menu_bar, MenuBarMetric::Lowest);
         assert!(!config.show_used);
         assert_eq!(config.refresh_seconds(), 300);
+        assert_eq!(config.cpu, Module { menu_bar: MenuStyle::Off, tab: true });
+    }
+
+    #[test]
+    fn a_module_reads_with_its_missing_fields_defaulted() {
+        let config: Config = serde_json::from_str(r#"{"cpu": {"menu_bar": "ring"}}"#).unwrap();
+        assert_eq!(config.cpu, Module { menu_bar: MenuStyle::Ring, tab: true });
+        assert_eq!(config.memory, Module::default());
     }
 
     #[test]

@@ -91,6 +91,18 @@ pub fn local_day(day: i32) -> Local {
     Local { day, hour: 12, month: tm.tm_mon as u8 + 1, day_of_month: tm.tm_mday as u8, weekday: tm.tm_wday as u8 }
 }
 
+/// The local time of day: "14:05", or "14:05:30" with `seconds`.
+pub fn clock(unix: i64, seconds: bool) -> String {
+    let time: libc::time_t = unix;
+    // SAFETY: as `local`.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&time, &mut tm);
+        tm
+    };
+    if seconds { format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec) } else { format!("{:02}:{:02}", tm.tm_hour, tm.tm_min) }
+}
+
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

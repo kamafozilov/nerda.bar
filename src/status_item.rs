@@ -1,6 +1,6 @@
-//! The menu bar items, one per provider: the provider's mark and a percentage. A click opens
-//! the panel under the item; a secondary click opens a menu. Rune has no macOS status item
-//! yet, so this is AppKit.
+//! The menu bar items: one per provider, its mark and a percentage, and one for each of this
+//! Mac's measures the settings put there. A click opens the panel under the item, on its tab;
+//! a secondary click opens a menu. Rune has no macOS status item yet, so this is AppKit.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictiona
 use rune::AppHandle;
 
 use crate::model::Severity;
-use crate::ui::{self, Anchor, Ui};
+use crate::ui::{self, Anchor, Tab, Ui};
 
 const TAG_USED: isize = 1;
 const TAG_LOGIN: isize = 2;
@@ -33,12 +33,23 @@ pub struct Mark {
 
 pub const CLAUDE_MARK: Mark = Mark { path: include_str!("../assets/providers/claude.path"), view: 100.0 };
 
+/// A picture drawn beside a measure's number, in place of a provider's mark.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Glyph {
+    /// A ring filled to this percentage.
+    Ring(u8),
+    /// The recent readings as bars, oldest first, each a percentage.
+    Bars(Vec<u8>),
+}
+
 struct Item {
     id: &'static str,
     status: Retained<NSStatusItem>,
     menu: Retained<NSMenu>,
+    /// A provider's item, which keeps its mark; a measure's shows its glyph or nothing.
+    marked: bool,
     /// What the item shows now, so an unchanged refresh draws nothing.
-    shown: Option<(Vec<Part>, bool)>,
+    shown: Option<(Option<Glyph>, Vec<Part>, bool)>,
 }
 
 thread_local! {
@@ -81,7 +92,8 @@ define_class!(
                 }
                 status.setMenu(None);
             } else if let Some(anchor) = anchor(&status, mtm) {
-                self.ivars().app.update(move |s, tx| ui::toggle(s, anchor, tx));
+                let tab = Tab::from_id(self.ivars().provider);
+                self.ivars().app.update(move |s, tx| ui::toggle(s, anchor, tab, tx));
             }
         }
 
@@ -265,8 +277,90 @@ fn mark_image(mark: &Mark, name: &str) -> Retained<NSImage> {
     image
 }
 
+/// The side of a measure's ring, and the size of its graph, in points.
+const RING: f64 = 14.0;
+const BAR_W: f64 = 2.0;
+const BAR_GAP: f64 = 1.0;
+const GRAPH_H: f64 = 14.0;
+
+/// A measure's glyph as a template image: what it shows is the ink, and the rest a fainter
+/// track, so AppKit tints both for the menu bar.
+fn glyph_image(glyph: &Glyph) -> Retained<NSImage> {
+    let glyph = glyph.clone();
+    let size = match &glyph {
+        Glyph::Ring(_) => NSSize::new(RING, RING),
+        Glyph::Bars(bars) => NSSize::new(bars.len().max(1) as f64 * (BAR_W + BAR_GAP) - BAR_GAP, GRAPH_H),
+    };
+    let draw = RcBlock::new(move |_rect: NSRect| -> Bool {
+        match &glyph {
+            Glyph::Ring(percent) => {
+                let (c, r, width) = (RING / 2.0, RING / 2.0 - 1.6, 2.4);
+                let arc = |from: f64, to: f64| {
+                    let path = NSBezierPath::bezierPath();
+                    let steps = ((to - from) * 48.0).ceil().max(1.0) as usize;
+                    for i in 0..=steps {
+                        // Clockwise from twelve o'clock, in flipped coordinates.
+                        let a = (from + (to - from) * i as f64 / steps as f64) * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
+                        let p = NSPoint::new(c + r * a.cos(), c + r * a.sin());
+                        if i == 0 { path.moveToPoint(p) } else { path.lineToPoint(p) }
+                    }
+                    path.setLineWidth(width);
+                    path
+                };
+                NSColor::blackColor().colorWithAlphaComponent(0.28).set();
+                arc(0.0, 1.0).stroke();
+                let share = (*percent as f64 / 100.0).clamp(0.0, 1.0);
+                if share > 0.0 {
+                    NSColor::blackColor().set();
+                    let path = arc(0.0, share.max(0.04));
+                    path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+                    path.stroke();
+                }
+            }
+            Glyph::Bars(bars) => {
+                // A faint baseline the width of the graph, so an idle stretch still reads as one.
+                let width = bars.len() as f64 * (BAR_W + BAR_GAP) - BAR_GAP;
+                NSColor::blackColor().colorWithAlphaComponent(0.35).set();
+                NSBezierPath::fillRect(NSRect::new(NSPoint::new(0.0, GRAPH_H - 2.0), NSSize::new(width, 1.0)));
+                NSColor::blackColor().set();
+                for (at, percent) in bars.iter().enumerate() {
+                    let h = (*percent as f64 / 100.0).clamp(0.0, 1.0) * (GRAPH_H - 2.0);
+                    if h >= 0.5 {
+                        let x = at as f64 * (BAR_W + BAR_GAP);
+                        NSBezierPath::fillRect(NSRect::new(NSPoint::new(x, GRAPH_H - 1.0 - h.max(1.0)), NSSize::new(BAR_W, h.max(1.0))));
+                    }
+                }
+            }
+        }
+        Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(size, true, &draw);
+    image.setTemplate(true);
+    image
+}
+
+/// Adds a measure's menu bar item, unless it is there already. Call on the main thread.
+pub fn install_measure(app: AppHandle<Ui>, data_dir: PathBuf, id: &'static str, name: &str) {
+    if ITEMS.with_borrow(|items| items.iter().any(|item| item.id == id)) {
+        return;
+    }
+    add(app, data_dir, id, name, None);
+}
+
+/// Takes an item out of the menu bar. macOS keeps its place for when it comes back.
+pub fn remove(id: &str) {
+    let removed = ITEMS.with_borrow_mut(|items| items.iter().position(|item| item.id == id).map(|at| items.remove(at)));
+    if let Some(item) = removed {
+        NSStatusBar::systemStatusBar().removeStatusItem(&item.status);
+    }
+}
+
 /// Adds a provider's menu bar item. Call on the main thread, after the app has started.
 pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str, mark: &Mark) {
+    add(app, data_dir, provider, name, Some(mark));
+}
+
+fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str, mark: Option<&Mark>) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
     // Remembered by macOS under this name, so the item keeps the place it is dragged to.
@@ -277,7 +371,9 @@ pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, na
     let target: Retained<Target> = unsafe { msg_send![super(target), init] };
 
     if let Some(button) = status.button(mtm) {
-        button.setImage(Some(&mark_image(mark, name)));
+        if let Some(mark) = mark {
+            button.setImage(Some(&mark_image(mark, name)));
+        }
         button.setImagePosition(NSCellImagePosition::ImageLeading);
         // SAFETY: the selector is the target's own method, and the target outlives the item.
         unsafe {
@@ -299,9 +395,12 @@ pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, na
     };
 
     let menu = NSMenu::new(mtm);
-    menu.addItem(&item(&format!("Refresh {name}"), sel!(refresh:)));
-    menu.addItem(&tagged(item("Show Used Instead of Left", sel!(toggleUsed:)), TAG_USED));
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    // A provider's limits refresh and read as left or used; a measure's do neither.
+    if mark.is_some() {
+        menu.addItem(&item(&format!("Refresh {name}"), sel!(refresh:)));
+        menu.addItem(&tagged(item("Show Used Instead of Left", sel!(toggleUsed:)), TAG_USED));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
     let login = tagged(item("Launch at Login", sel!(toggleLogin:)), TAG_LOGIN);
     if !login_item::available() {
         // A bare binary has no bundle for macOS to register.
@@ -321,7 +420,7 @@ pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, na
 
     // The target lives as long as the app: AppKit holds it weakly.
     std::mem::forget(target);
-    ITEMS.with_borrow_mut(|items| items.push(Item { id: provider, status, menu, shown: None }));
+    ITEMS.with_borrow_mut(|items| items.push(Item { id: provider, status, menu, marked: mark.is_some(), shown: None }));
 }
 
 /// Turns off Core Animation's implicit animations on the app's Metal layers.
@@ -389,27 +488,32 @@ pub fn set_show_used(show_used: bool) {
     SHOW_USED.set(show_used);
 }
 
-/// One limit in a menu bar item: its percentage, and with several limits shown, a letter
-/// saying which it is ("W" for weekly, "F" for a Fable limit).
+/// One number in a menu bar item, and a quieter name before it: with several limits shown, a
+/// letter saying which it is ("W" for weekly, "F" for a Fable limit), or a measure's name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
-    pub tag: Option<char>,
+    pub tag: Option<String>,
     pub text: String,
     pub severity: Severity,
 }
 
-/// Puts `parts` beside a provider's mark, each number coloured when its limit is running low,
-/// all dimmed when the numbers are not current. Call on the main thread.
-pub fn set(provider: &str, parts: &[Part], stale: bool, tooltip: &str) {
+/// Puts `parts` beside the item's mark, or beside `glyph` when it has one, each number coloured
+/// when its limit is running low, all dimmed when the numbers are not current. Call on the main
+/// thread.
+pub fn set(provider: &str, glyph: Option<Glyph>, parts: &[Part], stale: bool, tooltip: &str) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     ITEMS.with_borrow_mut(|items| {
         let Some(item) = items.iter_mut().find(|item| item.id == provider) else { return };
         let Some(button) = item.status.button(mtm) else { return };
         button.setToolTip(Some(&NSString::from_str(tooltip)));
-        let shown = (parts.to_vec(), stale);
+        let shown = (glyph, parts.to_vec(), stale);
         if item.shown.as_ref() == Some(&shown) {
             return;
         }
+        if !item.marked {
+            button.setImage(shown.0.as_ref().map(glyph_image).as_deref());
+        }
+        let pictured = item.marked || shown.0.is_some();
         // Digits of one width, so the item doesn't shift its neighbours as a number changes.
         let size = NSFont::systemFontSize() - 1.0;
         let number_font = NSFont::monospacedDigitSystemFontOfSize_weight(size, 0.0);
@@ -430,8 +534,8 @@ pub fn set(provider: &str, parts: &[Part], stale: bool, tooltip: &str) {
         };
         let title = NSMutableAttributedString::new();
         for (at, part) in parts.iter().enumerate() {
-            title.appendAttributedString(&piece(if at == 0 { " " } else { "   " }, &number_font, None));
-            if let Some(tag) = part.tag {
+            title.appendAttributedString(&piece(if at > 0 { "   " } else if pictured { " " } else { "" }, &number_font, None));
+            if let Some(tag) = &part.tag {
                 title.appendAttributedString(&piece(&format!("{tag}\u{2009}"), &tag_font, Some(&tag_colour)));
             }
             let colour = match part.severity {

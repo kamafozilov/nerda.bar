@@ -1,9 +1,9 @@
 [package]
 name = "nerda-bar"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Nerda Bar: AI subscription limits in the macOS menu bar, one item per provider, built with Rune"
+description = "Nerda Bar: AI subscription limits and the Mac's CPU and memory in the macOS menu bar, built with Rune"
 
 [[bin]]
 name = "nerda-bar"

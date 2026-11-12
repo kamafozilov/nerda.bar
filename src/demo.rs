@@ -29,6 +29,7 @@ pub fn fill(ui: &mut Ui) {
         fetched_at: now - 140,
     });
     ui.stats = Some(Arc::new(StatsView { ranges: [range(now, 1), range(now, 7), range(now, 30)] }));
+    ui.system = Some(Arc::new(crate::system::demo(now as f64)));
 }
 
 fn range(now: i64, days: i32) -> RangeView {

@@ -1,5 +1,7 @@
-//! Nerda Bar: AI subscription limits in the macOS menu bar, one item per provider, with a
-//! panel of limits and usage under each. Built with Rune (github.com/anomalyco/rune).
+//! Nerda Bar: AI subscription limits in the macOS menu bar, one item per provider, and this
+//! Mac's CPU and memory beside them, with a panel of tabs under each: limits and usage, and the
+//! measures with their history and the apps behind them. Built with Rune
+//! (github.com/anomalyco/rune).
 //!
 //! ```sh
 //! cargo run --release                 # menu bar app
@@ -18,6 +20,8 @@ mod model;
 mod prices;
 mod stats;
 mod status_item;
+mod system;
+mod system_view;
 mod time;
 mod ui;
 mod view;
@@ -26,7 +30,7 @@ mod worker;
 use rune::{App, AppSpec, RunOptions, WindowOptions, WindowSpec};
 
 use crate::model::Problem;
-use crate::ui::{Range, Ui};
+use crate::ui::{Range, Tab, Ui};
 
 /// Rune's headless tooling flags: with one of them the app renders sample data, adds no menu
 /// bar item and makes no requests.
@@ -73,7 +77,7 @@ fn cycle(handle: rune::AppHandle<Ui>) {
                 handle.update(ui::close);
                 std::thread::sleep(std::time::Duration::from_millis(700));
             }
-            handle.update(move |s, tx| ui::toggle(s, anchor, tx));
+            handle.update(move |s, tx| ui::toggle(s, anchor, Tab::Agents, tx));
             std::thread::sleep(std::time::Duration::from_millis(1300));
         }
     });
@@ -95,10 +99,33 @@ fn main() {
         // The system font, as AppKit draws it; Inter where it can't be found.
         families: (".AppleSystemUIFont, SF Pro Text, SF Pro, Helvetica Neue, Inter", "ui-monospace"),
         poll: Some(ui::poll),
+        setup: Some(|s, waker| s.images = Some(rune::ImageCache::new(waker))),
         on_key: Some(ui::on_key),
         scenes: &[
             ("used", |s| s.config.show_used = true),
             ("settings", |s| s.page = ui::Page::Settings),
+            ("cpu", |s| s.tab = Tab::Cpu),
+            ("cpu-day", |s| {
+                s.tab = Tab::Cpu;
+                s.tier = 2;
+            }),
+            ("cpu-hover", |s| {
+                s.tab = Tab::Cpu;
+                s.point = Some(140);
+            }),
+            ("memory", |s| s.tab = Tab::Memory),
+            ("memory-warning", |s| {
+                s.tab = Tab::Memory;
+                if let Some(view) = &mut s.system
+                    && let Some(memory) = &mut std::sync::Arc::make_mut(view).memory
+                {
+                    memory.pressure = system::Pressure::Warning;
+                }
+            }),
+            ("no-tabs", |s| {
+                s.config.cpu.tab = false;
+                s.config.memory.tab = false;
+            }),
             ("hover", |s| s.hovered = Some(2)),
             ("today", |s| s.range = Range::Today),
             ("month", |s| s.range = Range::Month),
@@ -124,11 +151,16 @@ fn main() {
         worker::spawn(data_dir.clone(), config.refresh_seconds(), move |event| ui.update(move |s, tx| ui::apply(s, event, tx)))
     });
 
+    let sampler = (!headless).then(|| {
+        let ui = me.clone();
+        system::spawn(move |view| ui.update_if(move |s, tx| ui::apply_system(s, view, tx)))
+    });
+
     let (state_handle, ready_handle) = (me.clone(), me);
     let (state_dir, state_config) = (data_dir.clone(), config.clone());
     let mut installed = false;
     let app = app
-        .init(move || Ui::new(state_handle, worker, state_config, state_dir, cached, headless))
+        .init(move || Ui::new(state_handle, worker, sampler, state_config, state_dir, cached, headless))
         .on_focus(ui::on_focus)
         // After the first (hidden) frame: the menu bar item, showing the last run's limits.
         .on_ready(move |_| {
@@ -138,7 +170,10 @@ fn main() {
             installed = true;
             status_item::set_show_used(config.show_used);
             status_item::install(ready_handle.clone(), data_dir.clone(), "claude", "Claude", &status_item::CLAUDE_MARK);
-            ready_handle.update(|s, _| s.sync_menu_bar());
+            ready_handle.update(|s, _| {
+                s.sync_menu_bar();
+                s.sync_system_items();
+            });
             cycle(ready_handle.clone());
             if show_at_launch {
                 // The menu bar gives a new item its place a moment after it is added.
@@ -147,7 +182,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_millis(600));
                     handle.update(|s, tx| {
                         if let Some(anchor) = test_anchor().or_else(|| status_item::anchor_of("claude")) {
-                            ui::open(s, anchor, tx);
+                            ui::open(s, anchor, Tab::Agents, tx);
                         }
                     });
                 });
