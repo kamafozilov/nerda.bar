@@ -149,11 +149,14 @@ fn anchor(status: &NSStatusItem, mtm: MainThreadMarker) -> Option<Anchor> {
     // AppKit measures up from the primary display's bottom-left corner; the panel is placed
     // down from its top-left.
     let primary = NSScreen::screens(mtm).firstObject()?.frame();
-    let screen = window.screen().map_or(primary, |screen| screen.frame());
+    let on = window.screen();
+    let scale = on.as_ref().map_or(window.backingScaleFactor(), |screen| screen.backingScaleFactor()) as f32;
+    let screen = on.map_or(primary, |screen| screen.frame());
     Some(Anchor {
         x: (frame.origin.x + frame.size.width / 2.0) as f32,
         y: (primary.size.height - frame.origin.y) as f32,
         screen: [screen.origin.x as f32, (screen.origin.x + screen.size.width) as f32],
+        scale,
     })
 }
 

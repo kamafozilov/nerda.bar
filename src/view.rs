@@ -48,6 +48,8 @@ struct Look {
     track: Color,
     tick: Color,
     chip: Color,
+    /// Behind a group of rows.
+    card: Color,
     panel: Color,
     panel_edge: Color,
     shadow: Color,
@@ -76,6 +78,7 @@ impl Look {
                 track: white.alpha(0.12),
                 tick: white.alpha(0.7),
                 chip: white.alpha(0.1),
+                card: white.alpha(0.055),
                 panel: hex("#1e1e21").alpha(0.9),
                 panel_edge: white.alpha(0.14),
                 shadow: black.alpha(0.45),
@@ -98,6 +101,7 @@ impl Look {
                 track: black.alpha(0.09),
                 tick: black.alpha(0.6),
                 chip: black.alpha(0.07),
+                card: black.alpha(0.04),
                 panel: hex("#f6f6f8").alpha(0.92),
                 panel_edge: white.alpha(0.7),
                 shadow: black.alpha(0.22),
@@ -141,6 +145,8 @@ const fn digits(size: f32, weight: f32) -> TextStyle {
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let l = Look::new(cx.system_dark());
+    // What a display of another scale waits for before it shows the panel.
+    s.drawn_scale.set(cx.env().scale);
     let limits = s.limits();
 
     let mut panel = col()
@@ -237,23 +243,10 @@ fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) 
         .child(text(label).font(font(11.5, if on { 600.0 } else { 500.0 })).color(if on { l.text } else { l.dim }))
 }
 
-/// The settings, in place of the limits and usage.
+/// The settings, in place of the limits and usage: one line each, name on the left and its
+/// control on the right, as System Settings lays a group out.
 fn settings(s: &Ui, l: &Look) -> El {
-    let setting = |name: &'static str, note: &'static str, control: El| {
-        row()
-            .w_full()
-            .gap(12.0)
-            .center_y()
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(2.0)
-                    .child(text(name).font(font(13.0, 500.0)).color(l.text))
-                    .child(text(note).font(font(11.0, 400.0).lh(14.5)).color(l.dim).w_full().wrap()),
-            )
-            .child(control)
-    };
+    let setting = |name: &'static str, control: El| row().w_full().h(44.0).px(12.0).center_y().child(text(name).font(font(13.0, 400.0)).color(l.text)).child(spacer()).child(control);
 
     let mut menu_bar = segments(l, "menu-bar");
     for (metric, label) in [(MenuBarMetric::Session, "Session"), (MenuBarMetric::Weekly, "Weekly"), (MenuBarMetric::Lowest, "Lowest")] {
@@ -264,7 +257,7 @@ fn settings(s: &Ui, l: &Look) -> El {
         percent = percent.child(segment(l, format!("percent-{label}"), label, s.config.show_used == used, move |s: &mut Ui| ui::set_show_used(s, used)));
     }
 
-    let (can_login, login) = s.login;
+    let (can_login, login) = (s.login.0 || s.demo, s.login.1);
     // A switch, as System Settings draws one.
     let mut switch = row()
         .key("login")
@@ -275,11 +268,15 @@ fn settings(s: &Ui, l: &Look) -> El {
         .px(2.0)
         .center_y()
         .fill(if login { l.normal } else { l.track })
-        .opacity(if can_login || s.demo { 1.0 } else { 0.45 })
+        .opacity(if can_login { 1.0 } else { 0.45 })
         .child(el().size(18.0, 18.0).radius(9.0).fill(Color::WHITE));
-    switch = if login { switch.justify_end() } else { switch };
-    if can_login || s.demo {
+    if login {
+        switch = switch.justify_end();
+    }
+    if can_login {
         switch = switch.on_press(move |s: &mut Ui| ui::set_launch_at_login(s, !login));
+    } else {
+        switch = switch.help("Available when run as Nerda Bar.app");
     }
 
     let open_file = row()
@@ -287,7 +284,7 @@ fn settings(s: &Ui, l: &Look) -> El {
         .role("button")
         .label("Open settings file")
         .h(24.0)
-        .px(10.0)
+        .px(12.0)
         .radius(8.0)
         .center()
         .fill(l.track)
@@ -295,19 +292,34 @@ fn settings(s: &Ui, l: &Look) -> El {
         .on_press_tx(ui::open_settings_file)
         .child(text("Open").font(font(11.5, 500.0)).color(l.text));
 
+    let group = col()
+        .key("settings-group")
+        .w_full()
+        .radius(10.0)
+        .fill(l.card)
+        .child(setting("Menu bar shows", menu_bar))
+        .child(rule(1.0, l.stroke).mx(12.0))
+        .child(setting("Percentages", percent))
+        .child(rule(1.0, l.stroke).mx(12.0))
+        .child(setting("Launch at Login", switch))
+        .child(rule(1.0, l.stroke).mx(12.0))
+        .child(setting("Settings file", open_file));
+
     col()
         .key("settings-page")
         .w_full()
         .px(PAD_X)
-        .pt(2.0)
-        .pb(16.0)
-        .gap(16.0)
-        .child(text("Settings").font(font(13.0, 600.0)).color(l.text))
-        .child(setting("Menu bar shows", "Lowest is the plan-wide limit with the least left.", menu_bar))
-        .child(setting("Percentages", "How much of a limit is left, or how much is used.", percent))
-        .child(setting("Launch at Login", if can_login || s.demo { "Start Nerda Bar when you log in." } else { "Available when run as Nerda Bar.app." }, switch))
-        .child(setting("Settings file", "Refresh interval and the panel's material.", open_file))
-        .child(text(concat!("Nerda Bar ", env!("CARGO_PKG_VERSION"))).font(font(11.0, 400.0)).color(l.faint))
+        .pb(14.0)
+        .gap(10.0)
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .child(text("Settings").font(font(13.0, 600.0)).color(l.text))
+                .child(spacer())
+                .child(text(concat!("Nerda Bar ", env!("CARGO_PKG_VERSION"))).font(digits(11.0, 400.0)).color(l.faint)),
+        )
+        .child(group)
 }
 
 /// A track with its filled share, and a tick where an even pace would have the fill end.
@@ -406,17 +418,18 @@ fn usage(s: &Ui, l: &Look) -> El {
         return body.child(text("No Claude Code activity in this period.").key("usage-empty").font(font(12.0, 400.0)).color(l.dim));
     }
 
-    // With the pointer on a bar, the figures are that bar's: its hour or its day.
-    let hovered = s.hovered.and_then(|at| view.bars.get(at));
-    let (tokens, cost, tokens_caption, cost_caption) = match hovered {
-        Some(bar) => (model::tokens(bar.tokens), if bar.tokens == 0 { "$0.00".to_owned() } else { model::money(bar.cost) }, format!("tokens · {}", bar.label), "at API prices".to_owned()),
-        None => (model::tokens(view.total()), view.cost_label(), "tokens".to_owned(), "at API prices".to_owned()),
-    };
-    let figure = |key: &'static str, value: String, caption: String, end: bool| {
-        let cell = col().key(key).gap(1.0).child(text(value).font(digits(22.0, 700.0).tracking(-0.4)).color(l.text)).child(text(caption).font(digits(11.0, 400.0)).color(l.dim));
+    let figure = |key: &'static str, value: String, caption: &'static str, end: bool| {
+        let cell = col().key(key).gap(1.0).child(text(value).font(digits(22.0, 700.0).tracking(-0.4)).color(l.text)).child(text(caption).font(font(11.0, 400.0)).color(l.dim));
         if end { cell.items_end() } else { cell }
     };
-    body = body.child(row().key("totals").w_full().child(figure("total-tokens", tokens, tokens_caption, false)).child(spacer()).child(figure("total-cost", cost, cost_caption, true)));
+    body = body.child(
+        row()
+            .key("totals")
+            .w_full()
+            .child(figure("total-tokens", model::tokens(view.total()), "tokens", false))
+            .child(spacer())
+            .child(figure("total-cost", view.cost_label(), "at API prices", true)),
+    );
     body = body.child(chart(l, view, s.hovered));
 
     let part = |name: &'static str, count: u64| col().grow(1.0).gap(1.0).child(text(name).font(font(10.5, 400.0)).color(l.faint)).child(text(model::tokens(count)).font(digits(12.0, 500.0)).color(l.text));
@@ -433,10 +446,21 @@ fn usage(s: &Ui, l: &Look) -> El {
 }
 
 fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
-    let peak = view.bars.iter().map(|bar| bar.tokens).max().unwrap_or(0).max(1) as f32;
+    let peak_at = view.bars.iter().enumerate().max_by_key(|(_, bar)| bar.tokens).map_or(0, |(at, _)| at);
+    let peak = view.bars.get(peak_at).map_or(0, |bar| bar.tokens).max(1) as f32;
     let few = view.bars.len() <= 7;
     let gap = if few { 6.0 } else { 2.0 };
-    let mut bars = row().key("chart").w_full().h(CHART_H).gap(gap);
+    let mut bars = row()
+        .key("chart")
+        .w_full()
+        .h(CHART_H)
+        .gap(gap)
+        // Leaving the chart lets go of the bar; crossing the gap between two bars doesn't.
+        .on_hover_change(|s: &mut Ui, inside, _| {
+            if !inside {
+                ui::leave_chart(s);
+            }
+        });
     for (at, bar) in view.bars.iter().enumerate() {
         let height = if bar.tokens == 0 { 2.0 } else { (bar.tokens as f32 / peak * CHART_H).max(3.0) };
         let on = hovered == Some(at);
@@ -445,7 +469,7 @@ fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
             (true, true, _) => l.dim,
             (true, ..) => l.track,
             (false, true, _) => l.bar_hover,
-            (false, false, true) => l.bar.alpha(0.35),
+            (false, false, true) => l.bar.alpha(0.45),
             (false, false, false) => l.bar,
         };
         // The whole column answers the pointer, so a short bar is as easy to reach as a tall one.
@@ -456,25 +480,47 @@ fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
                 .min_w(0.0)
                 .h(CHART_H)
                 .justify_end()
-                .on_hover_change(move |s: &mut Ui, inside, _| ui::hover_bar(s, at, inside))
+                .on_hover_change(move |s: &mut Ui, inside, _| {
+                    if inside {
+                        ui::hover_bar(s, at);
+                    }
+                })
                 .child(el().w_full().h(height).radius(if few { 3.0 } else { 1.5 }).fill(fill)),
         );
     }
-    let label = |name: &str| text(name).font(digits(10.0, 400.0)).color(l.faint);
     let mut axis = row().key("axis").w_full();
     if view.axis_per_bar {
         axis = axis.gap(gap);
         for (at, name) in view.axis.iter().enumerate() {
-            let name_color = if hovered == Some(at) { l.text } else { l.faint };
-            axis = axis.child(row().grow(1.0).min_w(0.0).center().child(text(name.as_str()).font(digits(10.0, 400.0)).color(name_color)));
+            axis = axis.child(row().grow(1.0).min_w(0.0).center().child(text(name.as_str()).font(digits(10.0, 400.0)).color(if hovered == Some(at) { l.text } else { l.faint })));
         }
     } else {
         axis = axis.justify_between();
         for name in &view.axis {
-            axis = axis.child(label(name));
+            axis = axis.child(text(name.as_str()).font(digits(10.0, 400.0)).color(l.faint));
         }
     }
-    col().w_full().gap(5.0).child(bars).child(axis)
+
+    // One line reads a single bar: the one under the pointer, or the busiest. It keeps its
+    // place and its shape, so moving across the chart changes only the words in it.
+    let (lead, bar) = match hovered.and_then(|at| view.bars.get(at)) {
+        Some(bar) => ("", Some(bar)),
+        None => ("Peak · ", view.bars.get(peak_at)),
+    };
+    let (name, tokens, cost) = bar.map_or_else(Default::default, |bar| (format!("{lead}{}", bar.label), model::tokens(bar.tokens), model::money(bar.cost)));
+    let readout = row()
+        .key("readout")
+        .w_full()
+        .h(26.0)
+        .px(8.0)
+        .radius(6.0)
+        .fill(l.card)
+        .center_y()
+        .child(text(name).font(digits(11.5, 500.0)).color(if hovered.is_some() { l.text } else { l.dim }))
+        .child(spacer())
+        .child(text(format!("{tokens} tokens")).font(digits(11.5, 400.0)).color(l.dim))
+        .child(row().w(58.0).justify_end().child(text(cost).font(digits(11.5, 500.0)).color(l.text)));
+    col().w_full().gap(5.0).child(bars).child(axis).child(el().h(3.0)).child(readout)
 }
 
 fn models(l: &Look, view: &RangeView) -> El {

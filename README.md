@@ -71,7 +71,7 @@ Nerda Bar shows how much of your Claude plan is left, and what you used, without
 - Every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be.
 - Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart, the split into input, output and cache, and a row per model.
 
-Move the pointer over the chart and the figures above it read for that hour or day. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, left or used, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
+The line under the chart reads the busiest hour or day, or the one under the pointer. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, left or used, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
 
 | Key | Action |
 | --- | --- |

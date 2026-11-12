@@ -1,6 +1,7 @@
 //! The panel's state and behaviour: what it shows, when it opens under its menu bar item and
 //! when it goes away.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,12 +27,19 @@ pub const WINDOW_H: f32 = 820.0;
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
 const SAME_CLICK_SECONDS: f64 = 0.35;
+/// The longest a panel waits, hidden, to be drawn at a new display's scale, and how often it
+/// looks.
+const RESCALE_SECONDS: f64 = 0.25;
+const RESCALE_STEP: f64 = 0.008;
 /// How often an open panel re-reads the clock for its countdowns.
 const TICK_SECONDS: f64 = 15.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {
     Hidden,
+    /// Placed on a display of another scale and still hidden, until a frame is drawn at that
+    /// scale or `deadline` on the app clock passes.
+    Opening { scale: f32, deadline: f64, drawn: bool },
     Shown,
 }
 
@@ -74,6 +82,8 @@ pub struct Anchor {
     pub y: f32,
     /// The left and right edges of the display the item is on.
     pub screen: [f32; 2],
+    /// That display's pixels per point.
+    pub scale: f32,
 }
 
 pub struct Ui {
@@ -100,6 +110,8 @@ pub struct Ui {
     /// The app clock when losing focus last closed the panel.
     blur_closed_at: f64,
     tick_due: f64,
+    /// The pixels per point the view last drew at.
+    pub drawn_scale: Cell<f32>,
 }
 
 impl Ui {
@@ -123,6 +135,7 @@ impl Ui {
             now: time::unix_now(),
             blur_closed_at: f64::NEG_INFINITY,
             tick_due: 0.0,
+            drawn_scale: Cell::new(0.0),
         };
         if demo {
             crate::demo::fill(&mut ui);
@@ -168,6 +181,8 @@ impl Ui {
 pub fn toggle(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
     match s.phase {
         Phase::Shown => close(s, tx),
+        // A second click before the panel is up takes the first one back.
+        Phase::Opening { .. } => s.phase = Phase::Hidden,
         _ if tx.clock() - s.blur_closed_at < SAME_CLICK_SECONDS => {}
         _ => open(s, anchor, tx),
     }
@@ -182,13 +197,27 @@ pub fn open(s: &mut Ui, anchor: Anchor, tx: &mut Tx) {
     let [left, right] = anchor.screen;
     // Centred under the item, kept on its display.
     let x = (anchor.x - WINDOW_W / 2.0).min(right - WINDOW_W + SHADOW_ROOM - 8.0).max(left - SHADOW_ROOM + 8.0);
-    crate::debug(|| format!("opening under {anchor:?} at x {x}"));
+    crate::debug(|| format!("opening under {anchor:?} at x {x}, last drawn at scale {}", s.drawn_scale.get()));
     s.me.place(DisplayTarget::Primary, OverlayPlacement::Rect { x, y: anchor.y, width: WINDOW_W, height: WINDOW_H });
+    s.send(Command::Opened);
+    if s.drawn_scale.get() == anchor.scale {
+        reveal(s, tx);
+    } else {
+        // The hidden panel's last frame was drawn for a display of another scale, and shown
+        // now it would be stretched to this one until the next frame. It moves there hidden,
+        // is drawn again, and only then shows.
+        s.phase = Phase::Opening { scale: anchor.scale, deadline: tx.clock() + RESCALE_SECONDS, drawn: false };
+        tx.wake_at(tx.clock() + RESCALE_STEP);
+    }
+}
+
+/// Brings the placed panel on screen.
+fn reveal(s: &mut Ui, tx: &mut Tx) {
+    tx.instant();
     s.me.open();
     s.phase = Phase::Shown;
     s.tick_due = tx.clock() + TICK_SECONDS;
     tx.wake_at(s.tick_due);
-    s.send(Command::Opened);
 }
 
 pub fn close(s: &mut Ui, tx: &mut Tx) {
@@ -203,6 +232,18 @@ pub fn close(s: &mut Ui, tx: &mut Tx) {
 
 pub fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     match s.phase {
+        Phase::Opening { scale, deadline, drawn } => {
+            let at_scale = s.drawn_scale.get() == scale;
+            if (at_scale && drawn) || clock >= deadline {
+                crate::debug(|| format!("shown at scale {scale} after {:.0} ms{}", (clock - (deadline - RESCALE_SECONDS)) * 1e3, if at_scale { "" } else { ", not yet drawn at it" }));
+                reveal(s, tx);
+            } else {
+                // One more step after the view ran at the new scale, for that frame to be drawn.
+                s.phase = Phase::Opening { scale, deadline, drawn: at_scale };
+                tx.wake_at(clock + RESCALE_STEP);
+            }
+            true
+        }
         // Countdowns move only while the panel shows, so a hidden panel never wakes.
         Phase::Shown if !s.demo && clock >= s.tick_due => {
             s.now = time::unix_now();
@@ -253,13 +294,14 @@ pub fn set_range(s: &mut Ui, range: Range) {
     s.hovered = None;
 }
 
-/// The pointer entered or left the chart bar at `at`.
-pub fn hover_bar(s: &mut Ui, at: usize, inside: bool) {
-    if inside {
-        s.hovered = Some(at);
-    } else if s.hovered == Some(at) {
-        s.hovered = None;
-    }
+/// The pointer came onto the chart bar at `at`.
+pub fn hover_bar(s: &mut Ui, at: usize) {
+    s.hovered = Some(at);
+}
+
+/// The pointer left the chart.
+pub fn leave_chart(s: &mut Ui) {
+    s.hovered = None;
 }
 
 /// Switches the panel between the limits and the settings.
@@ -414,7 +456,7 @@ mod tests {
     #[test]
     fn a_click_that_closed_the_panel_does_not_reopen_it() {
         let mut rt = runtime();
-        let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0] };
+        let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
         rt.frame(1.0 / 60.0);
@@ -422,6 +464,50 @@ mod tests {
         rt.update(move |s, tx| toggle(s, anchor, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Hidden);
+    }
+
+    #[test]
+    fn the_panel_shows_at_once_on_a_display_of_the_scale_it_was_drawn_at() {
+        let mut rt = runtime();
+        rt.update(|s, tx| close(s, tx));
+        rt.frame(1.0 / 60.0);
+        let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
+        rt.update(move |s, tx| toggle(s, anchor, tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.phase, Phase::Shown);
+    }
+
+    #[test]
+    fn on_a_display_of_another_scale_the_panel_waits_to_be_drawn_at_it() {
+        let mut rt = runtime();
+        rt.update(|s, tx| close(s, tx));
+        rt.frame(1.0 / 60.0);
+        let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
+        rt.update(move |s, tx| toggle(s, anchor, tx));
+        rt.frame(1.0 / 60.0);
+        assert!(matches!(rt.state.phase, Phase::Opening { .. }), "still hidden: its frame is for the other scale");
+        // Not yet drawn at the new scale: it keeps waiting.
+        rt.update(|s, tx| { poll(s, 0.01, tx); });
+        assert!(matches!(rt.state.phase, Phase::Opening { drawn: false, .. }));
+        // The view ran at the new scale, and one step later the panel shows.
+        rt.state.drawn_scale.set(1.0);
+        rt.update(|s, tx| { poll(s, 0.02, tx); });
+        assert!(matches!(rt.state.phase, Phase::Opening { drawn: true, .. }));
+        rt.update(|s, tx| { poll(s, 0.03, tx); });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.phase, Phase::Shown);
+    }
+
+    #[test]
+    fn a_display_that_never_redraws_still_gets_the_panel() {
+        let mut rt = runtime();
+        rt.update(|s, tx| close(s, tx));
+        rt.frame(1.0 / 60.0);
+        let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
+        rt.update(move |s, tx| toggle(s, anchor, tx));
+        rt.update(|s, tx| { poll(s, 10.0, tx); });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.phase, Phase::Shown);
     }
 
     #[test]

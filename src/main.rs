@@ -46,6 +46,15 @@ fn debug(message: impl FnOnce() -> String) {
     }
 }
 
+/// `NERDA_BAR_ANCHOR="x,y,left,right,scale"` stands in for the menu bar item's place with
+/// `--show`, to open the panel on a display the menu bar isn't active on.
+fn test_anchor() -> Option<ui::Anchor> {
+    let text = std::env::var("NERDA_BAR_ANCHOR").ok()?;
+    let parts: Vec<f32> = text.split(',').filter_map(|part| part.trim().parse().ok()).collect();
+    let [x, y, left, right, scale] = parts[..] else { return None };
+    Some(ui::Anchor { x, y, screen: [left, right], scale })
+}
+
 fn main() {
     rune::prewarm_gpu();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -112,7 +121,7 @@ fn main() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(600));
                     handle.update(|s, tx| {
-                        if let Some(anchor) = status_item::anchor_of("claude") {
+                        if let Some(anchor) = test_anchor().or_else(|| status_item::anchor_of("claude")) {
                             ui::open(s, anchor, tx);
                         }
                     });
