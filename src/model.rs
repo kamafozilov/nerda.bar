@@ -175,6 +175,19 @@ pub fn menu_bar_limit(snapshot: &Snapshot, metric: MenuBarMetric) -> Option<&Lim
     }
 }
 
+/// The limits the menu bar shows: the one `metric` picks, then with `models` every limit
+/// that counts one model alone, as those run out on their own.
+pub fn menu_bar_limits(snapshot: &Snapshot, metric: MenuBarMetric, models: bool) -> Vec<&Limit> {
+    let main = menu_bar_limit(snapshot, metric);
+    let scoped = snapshot.limits.iter().filter(|l| models && l.scoped);
+    main.into_iter().chain(scoped).collect()
+}
+
+/// The letter that names a limit in the menu bar: "S", "W", "F" for "Fable weekly".
+pub fn tag(limit: &Limit) -> char {
+    limit.label.chars().next().map_or('?', |c| c.to_ascii_uppercase())
+}
+
 /// A percentage as the menu bar and the panel print it: left or used, whole.
 pub fn percent(limit: &Limit, show_used: bool) -> String {
     let value = if show_used { limit.used.clamp(0.0, 100.0) } else { limit.left() };
@@ -257,6 +270,19 @@ mod tests {
         assert_eq!(menu_bar_limit(&snapshot, MenuBarMetric::Lowest).unwrap().id, "weekly");
         snapshot.limits[1].used = 100.0;
         assert_eq!(menu_bar_limit(&snapshot, MenuBarMetric::Session).unwrap().id, "weekly");
+    }
+
+    #[test]
+    fn the_menu_bar_adds_each_model_limit_with_its_letter() {
+        let mut fable = limit("weekly-fable", 89.0, 60, 100);
+        fable.label = "Fable weekly".to_owned();
+        fable.scoped = true;
+        let mut weekly = limit("weekly", 77.0, 60, 100);
+        weekly.label = "Weekly".to_owned();
+        let snapshot = Snapshot { plan: String::new(), limits: vec![weekly, fable], extra: None, fetched_at: NOW };
+        let shown = menu_bar_limits(&snapshot, MenuBarMetric::Session, true);
+        assert_eq!(shown.iter().map(|l| tag(l)).collect::<String>(), "WF");
+        assert_eq!(menu_bar_limits(&snapshot, MenuBarMetric::Session, false).len(), 1);
     }
 
     #[test]

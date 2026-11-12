@@ -157,11 +157,16 @@ impl Ui {
             return;
         }
         let limits = self.limits();
-        let shown = limits.as_ref().and_then(|snapshot| model::menu_bar_limit(snapshot, self.config.menu_bar));
-        let (text, severity) = match shown {
-            Some(limit) => (model::percent(limit, self.config.show_used), limit.severity()),
-            None => ("–".to_owned(), Severity::Normal),
-        };
+        let shown = limits.as_ref().map(|snapshot| model::menu_bar_limits(snapshot, self.config.menu_bar, self.config.menu_bar_models)).unwrap_or_default();
+        // One limit reads alone; with several, each takes its letter.
+        let tagged = shown.len() > 1;
+        let mut parts: Vec<status_item::Part> = shown
+            .iter()
+            .map(|limit| status_item::Part { tag: tagged.then(|| model::tag(limit)), text: model::percent(limit, self.config.show_used), severity: limit.severity() })
+            .collect();
+        if parts.is_empty() {
+            parts.push(status_item::Part { tag: None, text: "–".to_owned(), severity: Severity::Normal });
+        }
         let mut tooltip: Vec<String> = Vec::new();
         if let Some(problem) = &self.problem {
             tooltip.push(format!("Claude: {}", problem.title()));
@@ -170,7 +175,7 @@ impl Ui {
             let reset = limit.resets_in(self.now).map_or_else(String::new, |left| format!(", resets in {}", time::span(left)));
             tooltip.push(format!("{}: {} left{reset}", limit.label, model::percent(limit, false)));
         }
-        status_item::set("claude", &text, severity, self.problem.is_some(), &tooltip.join("\n"));
+        status_item::set("claude", &parts, self.problem.is_some(), &tooltip.join("\n"));
     }
 
     fn send(&self, command: Command) {
@@ -334,6 +339,14 @@ pub fn toggle_settings(s: &mut Ui, tx: &mut Tx) {
 
 pub fn set_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
     s.config.menu_bar = metric;
+    if !s.demo {
+        config::save(&s.data_dir, &s.config);
+    }
+    s.sync_menu_bar();
+}
+
+pub fn set_menu_bar_models(s: &mut Ui, on: bool) {
+    s.config.menu_bar_models = on;
     if !s.demo {
         config::save(&s.data_dir, &s.config);
     }

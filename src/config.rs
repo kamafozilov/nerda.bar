@@ -12,6 +12,8 @@ use crate::model::MenuBarMetric;
 pub struct Config {
     /// Which limit the menu bar shows: "session", "weekly" or "lowest".
     pub menu_bar: MenuBarMetric,
+    /// Also show each model's own limit (a Fable weekly limit) beside it.
+    pub menu_bar_models: bool,
     /// Show how much of each limit is used rather than how much is left.
     pub show_used: bool,
     /// Minutes between refreshes. Anthropic allows about 30 requests an hour, shared with
@@ -23,7 +25,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { menu_bar: MenuBarMetric::Session, show_used: false, refresh_minutes: 5, material: "popover".to_owned() }
+        Self { menu_bar: MenuBarMetric::Session, menu_bar_models: true, show_used: false, refresh_minutes: 5, material: "popover".to_owned() }
     }
 }
 

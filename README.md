@@ -64,14 +64,14 @@ Nerda Bar shows how much of your Claude plan is left, and what you used, without
   </tr>
 </table>
 
-**In the menu bar**, the provider's mark and a percentage: the session limit, or whichever plan-wide limit is used up and so is what blocks work. The number turns orange at 30% left and red at 10%, and dims when it could not be refreshed.
+**In the menu bar**, the provider's mark and a percentage: the session limit, or whichever plan-wide limit is used up and so is what blocks work. A limit on one model alone, such as Fable's weekly limit, shows beside it, each with its letter: `W 23%  F 11%`. The number turns orange at 30% left and red at 10%, and dims when it could not be refreshed.
 
 **In the panel**, opened with a click:
 
 - Every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be.
 - Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart, the split into input, output and cache, and a row per model.
 
-The line under the chart reads the busiest hour or day, or the one under the pointer. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, left or used, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
+The line under the chart reads the busiest hour or day, or the one under the pointer. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, model limits, left or used, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
 
 | Key | Action |
 | --- | --- |
@@ -91,18 +91,19 @@ Nothing else leaves your Mac.
 
 ## Settings
 
-The panel's settings cover the first two of these. The rest live in `~/Library/Application Support/nerda.bar/config.json`, read at launch:
+The panel's settings cover the first three of these. The rest live in `~/Library/Application Support/nerda.bar/config.json`, read at launch:
 
 ```json
 {
   "menu_bar": "session",
+  "menu_bar_models": true,
   "show_used": false,
   "refresh_minutes": 5,
   "material": "popover"
 }
 ```
 
-`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left). `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
+`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left). `menu_bar_models` adds each model's own limit beside it. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
 
 ## Build it yourself
 

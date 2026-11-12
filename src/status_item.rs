@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSStatusBar,
     NSStatusItem, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSError, NSNull, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSMutableAttributedString, NSError, NSNull, NSPoint, NSRect, NSSize, NSString, NSURL};
 use rune::AppHandle;
 
 use crate::model::Severity;
@@ -38,7 +38,7 @@ struct Item {
     status: Retained<NSStatusItem>,
     menu: Retained<NSMenu>,
     /// What the item shows now, so an unchanged refresh draws nothing.
-    shown: Option<(String, Severity, bool)>,
+    shown: Option<(Vec<Part>, bool)>,
 }
 
 thread_local! {
@@ -389,36 +389,58 @@ pub fn set_show_used(show_used: bool) {
     SHOW_USED.set(show_used);
 }
 
-/// Puts `text` beside a provider's mark: coloured when the limit is running low, dimmed when
-/// the numbers are not current. Call on the main thread.
-pub fn set(provider: &str, text: &str, severity: Severity, stale: bool, tooltip: &str) {
+/// One limit in a menu bar item: its percentage, and with several limits shown, a letter
+/// saying which it is ("W" for weekly, "F" for a Fable limit).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Part {
+    pub tag: Option<char>,
+    pub text: String,
+    pub severity: Severity,
+}
+
+/// Puts `parts` beside a provider's mark, each number coloured when its limit is running low,
+/// all dimmed when the numbers are not current. Call on the main thread.
+pub fn set(provider: &str, parts: &[Part], stale: bool, tooltip: &str) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     ITEMS.with_borrow_mut(|items| {
         let Some(item) = items.iter_mut().find(|item| item.id == provider) else { return };
         let Some(button) = item.status.button(mtm) else { return };
         button.setToolTip(Some(&NSString::from_str(tooltip)));
-        let shown = (text.to_owned(), severity, stale);
+        let shown = (parts.to_vec(), stale);
         if item.shown.as_ref() == Some(&shown) {
             return;
         }
-        // Digits of one width, so the item doesn't shift its neighbours as the number changes.
-        let font = NSFont::monospacedDigitSystemFontOfSize_weight(NSFont::systemFontSize() - 1.0, 0.0);
-        let colour = match severity {
-            Severity::Normal => None,
-            Severity::Warning => Some(NSColor::systemOrangeColor()),
-            Severity::Critical => Some(NSColor::systemRedColor()),
-        };
+        // Digits of one width, so the item doesn't shift its neighbours as a number changes.
+        let size = NSFont::systemFontSize() - 1.0;
+        let number_font = NSFont::monospacedDigitSystemFontOfSize_weight(size, 0.0);
+        // The letters a step quieter than the numbers: they name, the numbers tell.
+        let tag_font = NSFont::systemFontOfSize_weight(size - 2.0, 0.23);
+        let tag_colour = NSColor::secondaryLabelColor();
         // SAFETY: the attribute names are AppKit's constant strings.
         let (font_key, colour_key) = unsafe { (NSFontAttributeName, NSForegroundColorAttributeName) };
-        let font: &AnyObject = font.as_ref();
-        let attributes = match &colour {
-            Some(colour) => NSDictionary::from_slices(&[font_key, colour_key], &[font, colour.as_ref()]),
-            // No colour of its own: AppKit draws it as the menu bar's text.
-            None => NSDictionary::from_slices(&[font_key], &[font]),
+        let piece = |text: &str, font: &NSFont, colour: Option<&NSColor>| {
+            let font: &AnyObject = font.as_ref();
+            let attributes = match colour {
+                Some(colour) => NSDictionary::from_slices(&[font_key, colour_key], &[font, colour.as_ref()]),
+                // No colour of its own: AppKit draws it as the menu bar's text.
+                None => NSDictionary::from_slices(&[font_key], &[font]),
+            };
+            // SAFETY: the attributes are a font and a colour under their own keys.
+            unsafe { NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &NSString::from_str(text), Some(&attributes)) }
         };
-        let title = NSString::from_str(&format!(" {text}"));
-        // SAFETY: the attributes are a font and a colour under their own keys.
-        let title = unsafe { NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &title, Some(&attributes)) };
+        let title = NSMutableAttributedString::new();
+        for (at, part) in parts.iter().enumerate() {
+            title.appendAttributedString(&piece(if at == 0 { " " } else { "   " }, &number_font, None));
+            if let Some(tag) = part.tag {
+                title.appendAttributedString(&piece(&format!("{tag}\u{2009}"), &tag_font, Some(&tag_colour)));
+            }
+            let colour = match part.severity {
+                Severity::Normal => None,
+                Severity::Warning => Some(NSColor::systemOrangeColor()),
+                Severity::Critical => Some(NSColor::systemRedColor()),
+            };
+            title.appendAttributedString(&piece(&part.text, &number_font, colour.as_deref()));
+        }
         button.setAttributedTitle(&title);
         button.setAppearsDisabled(stale);
         item.shown = Some(shown);

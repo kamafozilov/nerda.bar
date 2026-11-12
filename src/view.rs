@@ -243,6 +243,28 @@ fn segment(l: &Look, key: String, label: &str, on: bool, pick: impl Fn(&mut Ui) 
         .child(text(label).font(font(11.5, if on { 600.0 } else { 500.0 })).color(if on { l.text } else { l.dim }))
 }
 
+/// A switch, as System Settings draws one.
+fn switch(l: &Look, key: &str, label: &str, on: bool, enabled: bool, flip: impl Fn(&mut Ui) + 'static) -> El {
+    let mut switch = row()
+        .key(key)
+        .role("switch")
+        .label(label)
+        .size(36.0, 22.0)
+        .radius(11.0)
+        .px(2.0)
+        .center_y()
+        .fill(if on { l.normal } else { l.track })
+        .opacity(if enabled { 1.0 } else { 0.45 })
+        .child(el().size(18.0, 18.0).radius(9.0).fill(Color::WHITE));
+    if on {
+        switch = switch.justify_end();
+    }
+    if enabled {
+        switch = switch.on_press(flip);
+    }
+    switch
+}
+
 /// The settings, in place of the limits and usage: one line each, name on the left and its
 /// control on the right, as System Settings lays a group out.
 fn settings(s: &Ui, l: &Look) -> El {
@@ -258,26 +280,12 @@ fn settings(s: &Ui, l: &Look) -> El {
     }
 
     let (can_login, login) = (s.login.0 || s.demo, s.login.1);
-    // A switch, as System Settings draws one.
-    let mut switch = row()
-        .key("login")
-        .role("switch")
-        .label("Launch at Login")
-        .size(36.0, 22.0)
-        .radius(11.0)
-        .px(2.0)
-        .center_y()
-        .fill(if login { l.normal } else { l.track })
-        .opacity(if can_login { 1.0 } else { 0.45 })
-        .child(el().size(18.0, 18.0).radius(9.0).fill(Color::WHITE));
-    if login {
-        switch = switch.justify_end();
+    let mut login_switch = switch(l, "login", "Launch at Login", login, can_login, move |s: &mut Ui| ui::set_launch_at_login(s, !login));
+    if !can_login {
+        login_switch = login_switch.help("Available when run as Nerda Bar.app");
     }
-    if can_login {
-        switch = switch.on_press(move |s: &mut Ui| ui::set_launch_at_login(s, !login));
-    } else {
-        switch = switch.help("Available when run as Nerda Bar.app");
-    }
+    let models = s.config.menu_bar_models;
+    let models_switch = switch(l, "menu-bar-models", "Model limits in the menu bar", models, true, move |s: &mut Ui| ui::set_menu_bar_models(s, !models));
 
     let open_file = row()
         .key("settings-file")
@@ -301,7 +309,9 @@ fn settings(s: &Ui, l: &Look) -> El {
         .child(rule(1.0, l.stroke).mx(12.0))
         .child(setting("Percentages", percent))
         .child(rule(1.0, l.stroke).mx(12.0))
-        .child(setting("Launch at Login", switch))
+        .child(setting("Model limits", models_switch))
+        .child(rule(1.0, l.stroke).mx(12.0))
+        .child(setting("Launch at Login", login_switch))
         .child(rule(1.0, l.stroke).mx(12.0))
         .child(setting("Settings file", open_file));
 
