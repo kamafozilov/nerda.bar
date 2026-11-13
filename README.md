@@ -30,7 +30,7 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on its Agents tab: a meter for each limit with its reset time, then tokens, cost, a chart and a row per model for the last 7 days, with a rail of tabs on the left"></td>
+    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on its Agents tab: a meter for each limit with its reset time, Fable's weekly limit opened up to a chart of how it fell across the week beside an even pace and a projection, then tokens, cost, a chart and a row per model for the last 7 days, with a rail of tabs on the left"></td>
     <td width="50%"><img src="docs/images/panel-light.png" alt="The same panel in light mode"></td>
   </tr>
 </table>
@@ -64,7 +64,7 @@ The panel has a tab for each thing it reads, in a rail down its left side: **Age
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/low.png" alt="The Agents tab with a session at 7% left in red and a weekly limit at 26% left in orange, each saying when it runs out"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row says when.</td>
+    <td width="50%"><img src="docs/images/low.png" alt="The Agents tab with a session at 7% left in red and a weekly limit at 26% left in orange, each saying when it runs out, and the weekly limit's chart projecting where it runs out"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row says when.</td>
     <td width="50%"><img src="docs/images/today.png" alt="The Agents tab showing today's usage by the hour"><br><b>Usage</b> for today by the hour, and for 7 and 30 days by the day.</td>
   </tr>
 </table>
@@ -74,9 +74,8 @@ The panel has a tab for each thing it reads, in a rail down its left side: **Age
 **In the panel**, opened with a click:
 
 - Every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be.
-- Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart, the split into input, output and cache, and a row per model.
-
-The line under the chart reads the busiest hour or day, or the one under the pointer. Click a limit to switch every percentage between left and used. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, model limits, left or used, how the CPU and memory show, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
+- One limit opened up to its history in place of its meter: how it fell from 100% day by day to what is left now, an even pace to compare against, and where the pace so far leads, with a ring where it runs out or resets. The line over the chart says when it resets and what was used today, or under the pointer, what was left then and what was used that day. A week's window reads by the day, the session's by the hour. Click another limit to open it instead; the panel starts on the weekly limit with the least left.
+- Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart and a row per model. The totals read the bar under the pointer while it is on the chart, and hold the split into input, output and cache in their tooltip. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, model limits, left or used, how the CPU and memory show, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
 
 ### This Mac
 
@@ -102,13 +101,14 @@ The line under the chart reads the busiest hour or day, or the one under the poi
 | ⌘1, ⌘2, ⌘3 | Agents, CPU, Memory |
 | ⌘R | Refresh the limits now |
 | ⌘, | Settings |
-| esc | Close the panel |
+| esc | Back from Settings, else close the panel |
 | ⌘Q | Quit |
 
 ## Where the numbers come from
 
 - **Limits** are what Anthropic reports for your login (`api.anthropic.com/api/oauth/usage`), the same numbers as Claude Code's `/usage`. They refresh every 5 minutes and when the panel opens, never more often than once a minute: the endpoint allows about 30 requests an hour, shared with Claude Code.
 - **The login** is Claude Code's, read from the Keychain item it keeps (or `~/.claude/.credentials.json`). It is only ever read. Nerda Bar never renews or rewrites it, because renewing it behind Claude Code's back can sign the CLI out; when the login has expired the panel says so, and running `claude` once renews it.
+- **The limit chart** draws what each refresh read, kept for 8 days in `history.json`. Where there are no readings (before Nerda Bar's first run, or while the Mac slept), what the limit gained across the gap is spread over its hours by what this Mac's messages to the models it counts would have cost at API prices, and drawn paler as an estimate. Use on another device shows up in the readings but not in this Mac's logs: across a gap with no activity here, the chart draws a straight line.
 - **Usage** is counted from Claude Code's own session logs under `~/.claude/projects`. Each message counts once, however many times the logs repeat it, by your local calendar day. Only what the logs gained since the last read is read again.
 - **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day and kept in `prices.json`. A model without a listed price shows `—` and the total a `+`. Fast mode's premium is not priced.
 - **CPU and memory** come from macOS itself, as Activity Monitor reads them: each core's ticks (`host_processor_info`), the memory's page counts (`host_statistics64`), memory pressure and swap (`sysctl`). None of it needs a password. They are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the panel's history needs them, and not at all with both tabs and both items off. The history is kept in memory, so it starts again when Nerda Bar does.
@@ -168,6 +168,7 @@ target/release/nerda-bar --list-scenes
 - `src/main.rs`: wiring and window options
 - `src/ui.rs`: state, tabs, keys, open and close
 - `src/view.rs`: the panel: its rail, the Agents tab, the settings
+- `src/burn.rs`, `src/burn_view.rs`: each limit's history and the chart of its window
 - `src/system_view.rs`: the CPU and Memory tabs
 - `src/status_item.rs`: the menu bar items, their glyphs and their menu (AppKit)
 - `src/worker.rs`: the background thread and its schedule
