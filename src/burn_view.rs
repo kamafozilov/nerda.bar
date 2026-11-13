@@ -1,11 +1,12 @@
-//! The open limit's chart on the Agents tab: how it went from nothing used to now across its
-//! window, beside an even pace, and where the pace so far leads. It takes the place of the
-//! row's meter, and the line over it reads now (when the limit resets, what was used today) or
-//! the moment under the pointer (what was left then, what was used that day).
+//! The picked limit's chart at the top of the Agents tab: how it went from nothing used to now
+//! across its window, beside an even pace, and where the pace so far leads. The rows under it
+//! pick which limit it shows. Over the chart, the limit's name and what is left, then what was
+//! used today; under the pointer, what was left at that moment and what was used that day.
 //!
 //! The chart follows the panel's percentages: what is left falls from 100%, or what is used
 //! climbs to it. Recorded stretches are a solid line, estimated ones a fainter line, the even
-//! pace dashed and the projection dotted, each named in the legend under the chart.
+//! pace dashed and the projection dotted, each named in the legend under the chart. Only the
+//! area under the line is filled: the chart sits on the panel itself.
 
 use rune::{Color, El, LineCap, Shape, canvas, col, row, spacer, text};
 
@@ -13,9 +14,10 @@ use crate::burn::{self, Curve, Source};
 use crate::model::{self, Limit, Severity, Snapshot};
 use crate::time::{self, WEEKDAYS};
 use crate::ui::{self, Ui};
-use crate::view::{INNER_W, Look, digits, font, reset_note, runway_note};
+use crate::view::{INNER_W, Look, PAD_X, digits, font, reset_note, runway_note};
 
-const CHART_H: f32 = 76.0;
+const CHART_H: f32 = 64.0;
+const AXIS_H: f32 = 12.0;
 const LINE: f32 = 1.75;
 /// The narrowest column that still gets its name under the chart.
 const LABEL_MIN_W: f32 = 22.0;
@@ -23,45 +25,61 @@ const HOUR_LABEL_MIN_W: f32 = 32.0;
 /// Points closer together than this along the chart are drawn as one.
 const THIN: f32 = 0.6;
 
-/// What the open limit's row shows in place of its meter, or `None` while it has no window
-/// under way to chart.
-pub fn expanded(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit) -> Option<El> {
+/// The chart of `limit`, the one picked, with its name and reading over it. A limit with no
+/// window under way says when one starts in the chart's place, so the panel keeps its height.
+pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit) -> El {
     let show_used = s.config.show_used;
     let activity = s.stats.as_ref().map_or(&[][..], |stats| stats.activity.as_slice());
-    let curve = burn::curve(limit, snapshot.fetched_at, s.history.readings(&limit.id), activity)?;
-    let moment = s.trace.map(|at| curve.start + ((curve.end - curve.start) as f64 * at as f64) as i64);
+    let curve = burn::curve(limit, snapshot.fetched_at, s.history.readings(&limit.id), activity);
+    let moment = curve.as_ref().and_then(|curve| s.trace.map(|at| curve.start + ((curve.end - curve.start) as f64 * at as f64) as i64));
+    let any_scoped = snapshot.limits.iter().any(|l| l.scoped);
+    let body = col().key("limit-history").w_full().px(PAD_X).pt(2.0).pb(12.0).gap(8.0);
+    let Some(curve) = curve else {
+        let empty = row().key("limit-chart-empty").w_full().h(CHART_H + 5.0 + AXIS_H).center().child(text(reset_note(limit, s.now)).font(font(11.5, 400.0)).color(l.faint));
+        return body.child(title(l, limit, any_scoped, None, None, show_used)).child(empty);
+    };
     let color = l.fill(limit.severity());
-    Some(
-        col()
-            .w_full()
-            .gap(7.0)
-            .child(reading(l, limit, &curve, moment, show_used, s.now))
-            .child(col().w_full().gap(5.0).child(chart(l, &curve, color, moment, show_used)).child(axis(l, &curve, moment)))
-            .child(legend(l, &curve, color)),
-    )
+    let head = col().w_full().gap(2.0).child(title(l, limit, any_scoped, Some(&curve), moment, show_used)).child(reading(l, limit, &curve, moment, s.now));
+    body.child(head)
+        .child(col().w_full().gap(5.0).child(chart(l, &curve, color, moment, show_used)).child(axis(l, &curve, moment)))
+        .child(legend(l, &curve, color))
 }
 
-/// The line over the chart. Now: when the limit resets and what was used today, and a warning
-/// when it runs out first. Under the pointer: when that is and what was used that day, and
-/// what was left then.
-fn reading(l: &Look, limit: &Limit, curve: &Curve, moment: Option<i64>, show_used: bool, now: i64) -> El {
-    let line = row().key("limit-readout").w_full().h(14.0).gap(8.0).center_y();
+/// The limit's name, and what is left of it now or at the moment under the pointer.
+fn title(l: &Look, limit: &Limit, any_scoped: bool, curve: Option<&Curve>, moment: Option<i64>, show_used: bool) -> El {
+    let (name, scope) = model::names(limit, any_scoped);
+    let mut names = row().gap(6.0).center_y().child(text(name).font(font(13.0, 600.0)).color(l.text));
+    if let Some(scope) = scope {
+        names = names.child(text(scope).font(font(13.0, 400.0)).color(l.dim));
+    }
+    let word = if show_used { "used" } else { "left" };
+    let read = curve.zip(moment).and_then(|(curve, t)| curve.at(t));
+    let (value, severity) = match read {
+        Some((used, source)) => {
+            let shown = if show_used { used } else { 100.0 - used }.clamp(0.0, 100.0);
+            (format!("{}{}% {word}", approx(source != Source::Recorded), shown.round() as i64), model::severity(100.0 - used))
+        }
+        None if moment.is_some() => (String::new(), Severity::Normal),
+        None => (format!("{} {word}", model::percent(limit, show_used)), limit.severity()),
+    };
+    row().key("limit-title").w_full().h(18.0).center_y().child(names).child(spacer()).child(text(value).font(digits(13.0, 600.0)).color(l.ink(severity)))
+}
+
+/// The line under the title. Now: what was used today, and whether the pace so far lasts
+/// until the reset. Under the pointer: when that is and what was used that day.
+fn reading(l: &Look, limit: &Limit, curve: &Curve, moment: Option<i64>, now: i64) -> El {
+    let line = row().key("limit-readout").w_full().h(14.0).gap(6.0).center_y();
     let Some(t) = moment else {
-        let mut line = line.child(text(format!("{} · {}", reset_note(limit, now), detail(curve, None))).font(digits(11.0, 400.0)).color(l.dim)).child(spacer());
+        let mut line = line.child(text(detail(curve, None)).font(digits(11.0, 400.0)).color(l.dim)).child(spacer());
         if let Some(warning) = runway_note(l, limit, now) {
             line = line.child(warning);
+        } else if curve.projection.is_some_and(|_| !curve.runs_out) {
+            line = line.child(text("Lasts until reset").font(font(11.0, 400.0)).color(l.dim));
         }
         return line;
     };
-    let value = curve.at(t);
     let when = if curve.daily() { time::weekday_clock(t) } else { time::clock(t, false) };
-    let shown = |used: f64| if show_used { used.clamp(0.0, 100.0) } else { (100.0 - used).clamp(0.0, 100.0) };
-    let number = value.map_or_else(String::new, |(used, source)| format!("{}{}% {}", approx(source != Source::Recorded), shown(used).round() as i64, if show_used { "used" } else { "left" }));
-    let severity = value.map_or(Severity::Normal, |(used, _)| model::severity(100.0 - used));
-    line.child(text(when).font(digits(11.0, 600.0)).color(l.text))
-        .child(text(detail(curve, Some(t))).font(digits(11.0, 400.0)).color(l.dim))
-        .child(spacer())
-        .child(text(number).font(digits(11.0, 600.0)).color(l.ink(severity)))
+    line.child(text(when).font(digits(11.0, 600.0)).color(l.text)).child(text(detail(curve, Some(t))).font(digits(11.0, 400.0)).color(l.dim)).child(spacer())
 }
 
 fn approx(on: bool) -> &'static str {
@@ -213,10 +231,10 @@ fn axis(l: &Look, curve: &Curve, moment: Option<i64>) -> El {
     let span = (curve.end - curve.start) as f32;
     let read = moment.and_then(|t| curve.bucket(t));
     let daily = curve.daily();
-    let mut axis = row().key("limit-axis").w_full().h(12.0);
+    let mut axis = row().key("limit-axis").w_full().h(AXIS_H);
     for (from, to) in curve.buckets() {
         let width = (to - from) as f32 / span * INNER_W;
-        let mut cell = row().w(width).min_w(0.0).h(12.0).center();
+        let mut cell = row().w(width).min_w(0.0).h(AXIS_H).center();
         let name = if daily { WEEKDAYS[time::local(from).weekday as usize].to_owned() } else { format!("{:02}:00", time::local(from).hour) };
         if width >= if daily { LABEL_MIN_W } else { HOUR_LABEL_MIN_W } {
             cell = cell.child(text(name).font(digits(10.0, 400.0)).color(if read == Some((from, to)) { l.text } else { l.faint }));

@@ -28,7 +28,7 @@ pub const SHADOW_ROOM: f32 = 28.0;
 pub const GAP: f32 = 5.0;
 pub const WINDOW_W: f32 = PANEL_W + 2.0 * SHADOW_ROOM;
 /// Taller than the panel ever is; the panel takes the height of its content.
-pub const WINDOW_H: f32 = 820.0;
+pub const WINDOW_H: f32 = 880.0;
 
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
@@ -769,12 +769,15 @@ mod tests {
         assert!(!rt.state.config.show_used, "a click on a limit no longer flips the percentages");
         click(&mut rt, "limit-session");
         assert_eq!(rt.state.chart.as_deref(), Some("session"));
-        // One chart, inside the open row; the others keep their meters.
-        let [_, chart_y, _, _] = rt.presented("limit-chart").unwrap().0;
-        let [_, row_y, _, row_h] = rt.presented("limit-session").unwrap().0;
-        assert!(chart_y > row_y && chart_y < row_y + row_h, "the chart is in the session's row");
+        // One chart, over the limits that pick it; every row keeps its meter.
+        let [_, chart_y, _, chart_h] = rt.presented("limit-chart").unwrap().0;
+        let [_, rows_y, _, _] = rt.presented("limits").unwrap().0;
+        assert!(chart_y + chart_h < rows_y, "the chart is over the limits");
+        for id in ["session", "weekly", "weekly-fable"] {
+            assert!(rt.presented(&format!("limit-{id}")).is_some(), "{id} keeps its row");
+        }
         let [_, y, _, h] = rt.presented("panel").unwrap().0;
-        assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall with the session open");
+        assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall with the session picked");
     }
 
     #[test]

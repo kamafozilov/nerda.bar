@@ -30,7 +30,7 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on its Agents tab: a meter for each limit with its reset time, Fable's weekly limit opened up to a chart of how it fell across the week beside an even pace and a projection, then tokens, cost, a chart and a row per model for the last 7 days, with a rail of tabs on the left"></td>
+    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on its Agents tab: a chart at the top of how Fable's weekly limit fell across the week beside an even pace and a projection, a meter for each limit with its reset time under it with Fable's picked, then tokens, cost, a chart and a row per model for the last 7 days, with a rail of tabs on the left"></td>
     <td width="50%"><img src="docs/images/panel-light.png" alt="The same panel in light mode"></td>
   </tr>
 </table>
@@ -64,7 +64,7 @@ The panel has a tab for each thing it reads, in a rail down its left side: **Age
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/low.png" alt="The Agents tab with a session at 7% left in red and a weekly limit at 26% left in orange, each saying when it runs out, and the weekly limit's chart projecting where it runs out"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row says when.</td>
+    <td width="50%"><img src="docs/images/low.png" alt="The Agents tab with a session at 7% left in red and a weekly limit at 26% left in orange, each saying when it runs out, and the weekly limit's chart at the top projecting where it runs out"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row says when.</td>
     <td width="50%"><img src="docs/images/today.png" alt="The Agents tab showing today's usage by the hour"><br><b>Usage</b> for today by the hour, and for 7 and 30 days by the day.</td>
   </tr>
 </table>
@@ -73,8 +73,8 @@ The panel has a tab for each thing it reads, in a rail down its left side: **Age
 
 **In the panel**, opened with a click:
 
-- Every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be.
-- One limit opened up to its history in place of its meter: how it fell from 100% day by day to what is left now, an even pace to compare against, and where the pace so far leads, with a ring where it runs out or resets. The line over the chart says when it resets and what was used today, or under the pointer, what was left then and what was used that day. A week's window reads by the day, the session's by the hour. Click another limit to open it instead; the panel starts on the weekly limit with the least left.
+- At the top, one limit's history: how it fell from 100% day by day to what is left now, an even pace to compare against, and where the pace so far leads, with a ring where it runs out or resets. Over the chart, the limit's name and what is left, what was used today and whether the pace lasts until the reset; under the pointer, what was left then and what was used that day. A week's window reads by the day, the session's by the hour.
+- Under it, every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be. Click a limit to show it in the chart; the one shown sits on a card, and the panel starts on the weekly limit with the least left.
 - Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart and a row per model. The totals read the bar under the pointer while it is on the chart, and hold the split into input, output and cache in their tooltip. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, model limits, left or used, how the CPU and memory show, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
 
 ### This Mac

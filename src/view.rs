@@ -1,7 +1,7 @@
 //! How the panel looks: a rail of tabs, and the tab beside it. The Agents tab has the provider
-//! and its plan, a row per limit (the picked one opened up to the chart of its window, in
-//! `burn_view`, the others a meter), then usage from the session logs: totals, a chart and a
-//! row per model. This Mac's tabs are in `system_view`.
+//! and its plan, the chart of the picked limit's window (in `burn_view`), a row per limit that
+//! picks it, then usage from the session logs: totals, a chart and a row per model. This Mac's
+//! tabs are in `system_view`.
 
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, icon, row, rule, spacer, text};
 
@@ -18,7 +18,7 @@ pub(crate) const PAD_X: f32 = 16.0;
 pub(crate) const INNER_W: f32 = CONTENT_W - 2.0 * PAD_X;
 const METER_H: f32 = 6.0;
 /// Around a limit row's content, inside the wash that marks the charted limit.
-const ROW_PAD: f32 = 8.0;
+const ROW_PAD: f32 = 6.0;
 const CHART_H: f32 = 56.0;
 const MODEL_ROWS: usize = 5;
 
@@ -212,8 +212,12 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         match &limits {
             Some(snapshot) => {
                 let charted = s.chart_limit(snapshot);
-                // Each row is a button with room around its content for the wash that marks
-                // the open one; the meters and the chart keep the full width.
+                if let Some(limit) = charted {
+                    panel = panel.child(burn_view::section(s, &l, snapshot, limit));
+                }
+                // The limits under the chart pick what it shows. Each row is a button with room
+                // around its content for the card that marks the picked one; the meters keep
+                // the full width.
                 let mut rows = col().key("limits").w_full().px(PAD_X - ROW_PAD).pb(8.0).gap(2.0);
                 for limit in &snapshot.limits {
                     let on = charted.is_some_and(|c| c.id == limit.id);
@@ -469,8 +473,8 @@ pub(crate) fn runway_note(l: &Look, limit: &Limit, now: i64) -> Option<El> {
     }
 }
 
-/// A limit: its name and what is left, then a meter and when it resets, or for the open one,
-/// the chart of its window in their place.
+/// A limit: its name and what is left, a meter and when it resets. The one in the chart sits
+/// on a quiet card; a click on another puts it in the chart.
 fn limit_row(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit, on: bool) -> El {
     let (now, show_used) = (s.now, s.config.show_used);
     let severity = limit.severity();
@@ -480,21 +484,6 @@ fn limit_row(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit, on: bool) -> 
     if let Some(scope) = scope {
         title = title.child(text(scope).font(font(13.0, 400.0)).color(l.dim));
     }
-    let id = limit.id.clone();
-    let mut body = col()
-        .key(format!("limit-{}", limit.id))
-        .w_full()
-        .padding(ROW_PAD)
-        .gap(7.0)
-        .radius(10.0)
-        .continuous_corners()
-        .fill(if on { l.fill(severity).alpha(0.12) } else { Color::TRANSPARENT })
-        .child(row().w_full().center_y().child(title).child(spacer()).child(text(value).font(digits(13.0, 600.0)).color(l.ink(severity))))
-        .role("button")
-        .label(format!("{}: {}", limit.label, model::percent(limit, show_used)));
-    if let Some(chart) = on.then(|| burn_view::expanded(s, l, snapshot, limit)).flatten() {
-        return body.child(chart);
-    }
     let share = if show_used { limit.used / 100.0 } else { limit.left() / 100.0 };
     // The tick marks an even pace: where the fill would be if use had kept step with time.
     let tick = limit.elapsed(now).filter(|_| !limit.used_up()).map(|elapsed| if show_used { elapsed } else { 1.0 - elapsed });
@@ -502,12 +491,21 @@ fn limit_row(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit, on: bool) -> 
     if let Some(warning) = runway_note(l, limit, now) {
         notes = notes.child(warning);
     }
-    body = body.child(meter(l, share, l.fill(severity), tick)).child(notes);
-    if on {
-        body
-    } else {
-        body.hover(l.hover).help("Click to show its history").on_press(move |s: &mut Ui| ui::select_limit(s, &id))
-    }
+    let id = limit.id.clone();
+    let body = col()
+        .key(format!("limit-{}", limit.id))
+        .role("button")
+        .label(format!("{}: {}", limit.label, model::percent(limit, show_used)))
+        .w_full()
+        .padding(ROW_PAD)
+        .gap(6.0)
+        .radius(10.0)
+        .continuous_corners()
+        .fill(if on { l.card } else { Color::TRANSPARENT })
+        .child(row().w_full().center_y().child(title).child(spacer()).child(text(value).font(digits(13.0, 600.0)).color(l.ink(severity))))
+        .child(meter(l, share, l.fill(severity), tick))
+        .child(notes);
+    if on { body } else { body.hover(l.hover).help("Click to show it in the chart").on_press(move |s: &mut Ui| ui::select_limit(s, &id)) }
 }
 
 fn extra_row(l: &Look, extra: &ExtraUsage) -> El {
@@ -516,7 +514,7 @@ fn extra_row(l: &Look, extra: &ExtraUsage) -> El {
         Some(limit) => format!("{} of {}", amount(extra.used), amount(limit)),
         None => amount(extra.used),
     };
-    let mut body = col().key("limit-extra").w_full().padding(ROW_PAD).gap(7.0).child(
+    let mut body = col().key("limit-extra").w_full().padding(ROW_PAD).gap(6.0).child(
         row()
             .w_full()
             .center_y()
