@@ -13,6 +13,8 @@
 compile_error!("Nerda Bar is a macOS app.");
 
 mod alloc;
+mod burn;
+mod burn_view;
 mod claude;
 mod config;
 mod demo;
@@ -129,11 +131,14 @@ fn main() {
             ("hover", |s| s.hovered = Some(2)),
             ("today", |s| s.range = Range::Today),
             ("month", |s| s.range = Range::Month),
+            ("trace", |s| s.trace = Some(0.3)),
+            ("session", |s| s.chart = Some("session".to_owned())),
             ("low", |s| {
                 if let Some(snapshot) = &mut s.snapshot {
                     snapshot.limits[0].used = 93.0;
                     snapshot.limits[1].used = 74.0;
                 }
+                demo::refill_history(s);
             }),
             ("offline", |s| s.problem = Some(Problem::Offline("Couldn't reach Claude: the network is down.".to_owned()))),
             ("signed-out", |s| {

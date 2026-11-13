@@ -30,6 +30,9 @@ pub const CACHE_WRITE_1H: usize = 3;
 pub const CACHE_READ: usize = 4;
 pub type Tokens = [u64; 5];
 
+/// Days of hourly activity handed to the limit chart: a week's window and the day it started.
+pub const ACTIVITY_DAYS: i32 = 8;
+
 /// Request sizes are kept in steps of this many prompt tokens, which is what long-context
 /// price tiers are cut at.
 pub const CONTEXT_STEP: u64 = 50_000;
@@ -262,10 +265,31 @@ impl Scanner {
         true
     }
 
-    /// The counts as the panel shows them: today, the last 7 days and the last 30.
+    /// The counts as the panel shows them: today, the last 7 days and the last 30, and the
+    /// activity of the last week by the hour.
     pub fn view(&self, prices: &Prices, now: i64) -> StatsView {
         let today = time::local(now).day;
-        StatsView { ranges: [self.range(prices, today, 1), self.range(prices, today, 7), self.range(prices, today, DAYS)] }
+        StatsView { ranges: [self.range(prices, today, 1), self.range(prices, today, 7), self.range(prices, today, DAYS)], activity: self.activity(prices, today) }
+    }
+
+    /// Each hour's messages by model, weighed by what they would have cost.
+    fn activity(&self, prices: &Prices, today: i32) -> Vec<Activity> {
+        let mut by_hour: HashMap<(i32, u8, u16), f64> = HashMap::new();
+        for (key, tokens) in &self.cells {
+            if key.day < today - ACTIVITY_DAYS || key.day > today {
+                continue;
+            }
+            let model = &self.models[key.model as usize];
+            let weight = prices.cost(model, key.context as u64 * CONTEXT_STEP, tokens).unwrap_or_else(|| nominal_cost(tokens));
+            *by_hour.entry((key.day, key.hour, key.model)).or_default() += weight;
+        }
+        let mut activity: Vec<Activity> = by_hour
+            .into_iter()
+            .filter(|(_, weight)| *weight > 0.0)
+            .map(|((day, hour, model), weight)| Activity { at: time::local_hour_start(day, hour), model: display_name(&self.models[model as usize]).to_owned(), weight })
+            .collect();
+        activity.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.model.cmp(&b.model)));
+        activity
     }
 
     fn range(&self, prices: &Prices, today: i32, days: i32) -> RangeView {
@@ -321,6 +345,13 @@ impl Scanner {
         view.bars = bars;
         view
     }
+}
+
+/// What tokens of a model without a known price weigh: a mid-range model's prices, so its
+/// output still outweighs its cache reads as it would on any price list.
+fn nominal_cost(tokens: &Tokens) -> f64 {
+    let per_million = [3.0, 15.0, 3.75, 6.0, 0.3];
+    tokens.iter().zip(per_million).map(|(count, price)| *count as f64 * price).sum::<f64>() / 1e6
 }
 
 /// A model id without its release date: "claude-opus-4-5-20251101" is "claude-opus-4-5".
@@ -397,10 +428,23 @@ impl RangeView {
     }
 }
 
+/// One model's messages in one hour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Activity {
+    /// Unix seconds of the hour's start.
+    pub at: i64,
+    /// As [`display_name`].
+    pub model: String,
+    /// What the messages would have cost at API prices.
+    pub weight: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatsView {
     /// Today, 7 days, 30 days.
     pub ranges: [RangeView; 3],
+    /// The last [`ACTIVITY_DAYS`] by the hour, oldest first.
+    pub activity: Vec<Activity>,
 }
 
 #[cfg(test)]
@@ -496,6 +540,13 @@ mod tests {
         assert!(view.ranges[2].unpriced && !view.ranges[1].unpriced);
         assert_eq!(view.ranges[2].models.last().unwrap().cost, None);
         assert!(view.ranges[2].cost_label().ends_with('+'));
+        // The week's activity by the hour: November's two messages, not October's.
+        assert_eq!(view.activity.len(), 2);
+        assert!(view.activity[0].at < view.activity[1].at);
+        // 10:00 UTC on the 12th, in whatever zone the test runs in.
+        let at = view.activity[1].at;
+        assert!(at <= 1_794_477_600 && 1_794_477_600 - at < 3600);
+        assert!((view.activity[1].weight - 100.0 * 5.0 / 1e6).abs() < 1e-12);
         let _ = std::fs::remove_dir_all(dir);
     }
 

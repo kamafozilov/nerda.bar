@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use rune::{AppHandle, DisplayTarget, Image, ImageCache, Key, KeyEvent, OverlayPlacement, SystemMaterial, Tx};
 
+use crate::burn::History;
 use crate::config::{self, Config, MenuStyle, Module};
-use crate::model::{self, Problem, Severity, Snapshot};
+use crate::model::{self, Limit, Problem, Severity, Snapshot};
 use crate::stats::StatsView;
 use crate::status_item;
 use crate::system::{Pressure, Rate, Sampler, SystemView};
@@ -118,6 +119,15 @@ impl Range {
     pub fn index(self) -> usize {
         self as usize
     }
+
+    /// The range as the usage totals name it.
+    pub fn span(self) -> &'static str {
+        match self {
+            Range::Today => "Today",
+            Range::Week => "Last 7 days",
+            Range::Month => "Last 30 days",
+        }
+    }
 }
 
 /// Where a menu bar item is, in points from the primary display's top-left corner.
@@ -145,8 +155,14 @@ pub struct Ui {
     pub problem: Option<Problem>,
     pub refreshing: bool,
     pub stats: Option<Arc<StatsView>>,
+    /// Every limit's readings, for the limit chart.
+    pub history: Arc<History>,
+    /// The id of the limit the chart shows, once one was picked.
+    pub chart: Option<String>,
+    /// Where the pointer is along the limit chart, from 0 to 1.
+    pub trace: Option<f32>,
     pub range: Range,
-    /// The chart bar under the pointer: the totals above the chart read for it.
+    /// The usage chart's bar under the pointer: the line under the chart reads it.
     pub hovered: Option<usize>,
     pub page: Page,
     pub tab: Tab,
@@ -190,6 +206,9 @@ impl Ui {
             problem: None,
             refreshing: false,
             stats: None,
+            history: Arc::new(History::default()),
+            chart: None,
+            trace: None,
             range: Range::Week,
             hovered: None,
             page: Page::Tab,
@@ -329,6 +348,12 @@ impl Ui {
         self.snapshot.as_ref().map(|snapshot| snapshot.rolled(self.now))
     }
 
+    /// The limit the chart shows: the one picked, while the plan still has it, else the
+    /// default.
+    pub fn chart_limit<'a>(&self, snapshot: &'a Snapshot) -> Option<&'a Limit> {
+        self.chart.as_deref().and_then(|id| snapshot.limit(id)).or_else(|| model::chart_default(snapshot))
+    }
+
     /// Puts the current limits on the menu bar item.
     pub fn sync_menu_bar(&self) {
         if self.demo {
@@ -391,6 +416,7 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     s.tab = if s.tabs().contains(&tab) { tab } else { Tab::Agents };
     s.hovered = None;
     s.point = None;
+    s.trace = None;
     let [left, right] = anchor.screen;
     // Centred under the item, kept on its display.
     let x = (anchor.x - WINDOW_W / 2.0).min(right - WINDOW_W + SHADOW_ROOM - 8.0).max(left - SHADOW_ROOM + 8.0);
@@ -430,6 +456,7 @@ pub fn close(s: &mut Ui, tx: &mut Tx) {
     s.phase = Phase::Hidden;
     s.hovered = None;
     s.point = None;
+    s.trace = None;
     s.me.hide();
     s.sync_rate();
 }
@@ -485,6 +512,7 @@ pub fn apply(s: &mut Ui, event: Event, tx: &mut Tx) {
             s.refreshing = false;
         }
         Event::Stats(stats) => s.stats = Some(stats),
+        Event::History(history) => s.history = history,
     }
     s.sync_menu_bar();
 }
@@ -508,6 +536,7 @@ pub fn set_tab(s: &mut Ui, tab: Tab, tx: &mut Tx) {
     s.page = Page::Tab;
     s.hovered = None;
     s.point = None;
+    s.trace = None;
     s.sync_rate();
 }
 
@@ -580,6 +609,21 @@ pub fn refresh(s: &mut Ui) {
 pub fn set_range(s: &mut Ui, range: Range) {
     s.range = range;
     s.hovered = None;
+}
+
+/// Shows `id`'s history in the limit chart.
+pub fn select_limit(s: &mut Ui, id: &str) {
+    s.chart = Some(id.to_owned());
+    s.trace = None;
+}
+
+/// The pointer at `at` along the limit chart, from 0 to 1.
+pub fn trace_limit(s: &mut Ui, at: f32) {
+    s.trace = Some(at.clamp(0.0, 1.0));
+}
+
+pub fn leave_trace(s: &mut Ui) {
+    s.trace = None;
 }
 
 /// The pointer came onto the chart bar at `at`.
@@ -685,7 +729,7 @@ mod tests {
     #[test]
     fn the_panel_draws_its_limits_and_usage() {
         let rt = runtime();
-        for key in ["panel", "limit-session", "limit-weekly", "usage", "chart", "footer"] {
+        for key in ["panel", "limit-session", "limit-weekly", "limit-chart", "usage", "chart", "totals", "footer"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
         // The panel fits the window with its shadow room to spare.
@@ -713,6 +757,37 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn a_click_on_a_limit_shows_it_in_the_chart() {
+        let mut rt = runtime();
+        let default = rt.state.limits().and_then(|snapshot| rt.state.chart_limit(&snapshot).map(|l| l.id.clone()));
+        assert_eq!(default.as_deref(), Some("weekly-fable"), "the weekly limit with the least left");
+        click(&mut rt, "limit-weekly");
+        assert_eq!(rt.state.chart.as_deref(), Some("weekly"));
+        assert!(!rt.state.config.show_used, "a click on a limit no longer flips the percentages");
+        click(&mut rt, "limit-session");
+        assert_eq!(rt.state.chart.as_deref(), Some("session"));
+        // One chart, inside the open row; the others keep their meters.
+        let [_, chart_y, _, _] = rt.presented("limit-chart").unwrap().0;
+        let [_, row_y, _, row_h] = rt.presented("limit-session").unwrap().0;
+        assert!(chart_y > row_y && chart_y < row_y + row_h, "the chart is in the session's row");
+        let [_, y, _, h] = rt.presented("panel").unwrap().0;
+        assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall with the session open");
+    }
+
+    #[test]
+    fn the_pointer_over_the_limit_chart_reads_that_moment() {
+        let mut rt = runtime();
+        let [x, y, w, h] = rt.presented("limit-chart").unwrap().0;
+        rt.pointer_move(x + w * 0.25, y + h / 2.0);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.trace.is_some_and(|at| (at - 0.25).abs() < 0.01));
+        let (fx, fy) = centre(&rt, "footer");
+        rt.pointer_move(fx, fy);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.trace, None);
     }
 
     #[test]

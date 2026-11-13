@@ -1,9 +1,11 @@
 //! How the panel looks: a rail of tabs, and the tab beside it. The Agents tab has the provider
-//! and its plan, a meter per limit, then usage from the session logs as totals, a chart and a
-//! row per model; this Mac's tabs are in `system_view`.
+//! and its plan, a row per limit (the picked one opened up to the chart of its window, in
+//! `burn_view`, the others a meter), then usage from the session logs: totals, a chart and a
+//! row per model. This Mac's tabs are in `system_view`.
 
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, icon, row, rule, spacer, text};
 
+use crate::burn_view;
 use crate::config::MenuStyle;
 use crate::model::{self, ExtraUsage, Limit, MenuBarMetric, Severity, Snapshot};
 use crate::stats::{CACHE_READ, CACHE_WRITE_1H, CACHE_WRITE_5M, INPUT, OUTPUT, RangeView};
@@ -15,6 +17,8 @@ const RADIUS: f32 = 18.0;
 pub(crate) const PAD_X: f32 = 16.0;
 pub(crate) const INNER_W: f32 = CONTENT_W - 2.0 * PAD_X;
 const METER_H: f32 = 6.0;
+/// Around a limit row's content, inside the wash that marks the charted limit.
+const ROW_PAD: f32 = 8.0;
 const CHART_H: f32 = 56.0;
 const MODEL_ROWS: usize = 5;
 
@@ -59,6 +63,7 @@ static QUIT: Icon = Icon {
 /// The colours of one appearance.
 #[derive(Clone, Copy)]
 pub(crate) struct Look {
+    pub dark: bool,
     pub text: Color,
     pub dim: Color,
     pub faint: Color,
@@ -94,6 +99,7 @@ impl Look {
         let hex = |s: &str| rune::color::hex(s).unwrap_or(Color::WHITE);
         if dark {
             Look {
+                dark: true,
                 text: white.alpha(0.92),
                 dim: white.alpha(0.58),
                 faint: white.alpha(0.36),
@@ -119,6 +125,7 @@ impl Look {
             }
         } else {
             Look {
+                dark: false,
                 text: black.alpha(0.88),
                 dim: black.alpha(0.55),
                 faint: black.alpha(0.36),
@@ -145,7 +152,7 @@ impl Look {
         }
     }
 
-    fn fill(&self, severity: Severity) -> Color {
+    pub(crate) fn fill(&self, severity: Severity) -> Color {
         match severity {
             Severity::Normal => self.normal,
             Severity::Warning => self.warning,
@@ -153,7 +160,7 @@ impl Look {
         }
     }
 
-    fn ink(&self, severity: Severity) -> Color {
+    pub(crate) fn ink(&self, severity: Severity) -> Color {
         match severity {
             Severity::Normal => self.text,
             Severity::Warning => self.warning_text,
@@ -204,9 +211,13 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         }
         match &limits {
             Some(snapshot) => {
-                let mut rows = col().key("limits").w_full().px(PAD_X).pb(14.0).gap(14.0);
+                let charted = s.chart_limit(snapshot);
+                // Each row is a button with room around its content for the wash that marks
+                // the open one; the meters and the chart keep the full width.
+                let mut rows = col().key("limits").w_full().px(PAD_X - ROW_PAD).pb(8.0).gap(2.0);
                 for limit in &snapshot.limits {
-                    rows = rows.child(limit_row(&l, limit, s.now, s.config.show_used));
+                    let on = charted.is_some_and(|c| c.id == limit.id);
+                    rows = rows.child(limit_row(s, &l, snapshot, limit, on));
                 }
                 if let Some(extra) = &snapshot.extra {
                     rows = rows.child(extra_row(&l, extra));
@@ -440,41 +451,63 @@ fn meter(l: &Look, share: f64, fill: Color, tick: Option<f64>) -> El {
     track
 }
 
-fn limit_row(l: &Look, limit: &Limit, now: i64, show_used: bool) -> El {
-    let severity = limit.severity();
-    let share = if show_used { limit.used / 100.0 } else { limit.left() / 100.0 };
-    // The tick marks an even pace: where the fill would be if use had kept step with time.
-    let tick = limit.elapsed(now).filter(|_| !limit.used_up()).map(|elapsed| if show_used { elapsed } else { 1.0 - elapsed });
-    let value = format!("{} {}", model::percent(limit, show_used), if show_used { "used" } else { "left" });
-    let reset = match limit.resets_in(now) {
+/// When a limit resets: "Resets in 2d 4h".
+pub(crate) fn reset_note(limit: &Limit, now: i64) -> String {
+    match limit.resets_in(now) {
         Some(left) => format!("Resets in {}", time::span(left)),
         None if limit.used <= 0.0 => "Starts with your next message".to_owned(),
         None => "Resetting".to_owned(),
-    };
-    let mut notes = row().w_full().center_y().child(text(reset).font(digits(11.0, 400.0)).color(l.dim)).child(spacer());
-    if limit.used_up() {
-        notes = notes.child(text("Used up").font(font(11.0, 500.0)).color(l.critical_text));
-    } else if let Some(runway) = limit.runs_out_in(now) {
-        notes = notes.child(text(format!("Runs out in {}", time::span(runway))).font(digits(11.0, 500.0)).color(l.warning_text));
     }
-    col()
+}
+
+/// A warning that the limit is used up, or will be before it resets at the pace so far.
+pub(crate) fn runway_note(l: &Look, limit: &Limit, now: i64) -> Option<El> {
+    if limit.used_up() {
+        Some(text("Used up").font(font(11.0, 500.0)).color(l.critical_text))
+    } else {
+        limit.runs_out_in(now).map(|runway| text(format!("Runs out in {}", time::span(runway))).font(digits(11.0, 500.0)).color(l.warning_text))
+    }
+}
+
+/// A limit: its name and what is left, then a meter and when it resets, or for the open one,
+/// the chart of its window in their place.
+fn limit_row(s: &Ui, l: &Look, snapshot: &Snapshot, limit: &Limit, on: bool) -> El {
+    let (now, show_used) = (s.now, s.config.show_used);
+    let severity = limit.severity();
+    let value = format!("{} {}", model::percent(limit, show_used), if show_used { "used" } else { "left" });
+    let (name, scope) = model::names(limit, snapshot.limits.iter().any(|l| l.scoped));
+    let mut title = row().gap(6.0).center_y().child(text(name).font(font(13.0, 500.0)).color(l.text));
+    if let Some(scope) = scope {
+        title = title.child(text(scope).font(font(13.0, 400.0)).color(l.dim));
+    }
+    let id = limit.id.clone();
+    let mut body = col()
         .key(format!("limit-{}", limit.id))
         .w_full()
+        .padding(ROW_PAD)
         .gap(7.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(text(limit.label.as_str()).font(font(13.0, 500.0)).color(l.text))
-                .child(spacer())
-                .child(text(value).font(digits(13.0, 600.0)).color(l.ink(severity))),
-        )
-        .child(meter(l, share, l.fill(severity), tick))
-        .child(notes)
+        .radius(10.0)
+        .continuous_corners()
+        .fill(if on { l.fill(severity).alpha(0.12) } else { Color::TRANSPARENT })
+        .child(row().w_full().center_y().child(title).child(spacer()).child(text(value).font(digits(13.0, 600.0)).color(l.ink(severity))))
         .role("button")
-        .label(format!("{}: {}", limit.label, model::percent(limit, show_used)))
-        .help(if show_used { "Click to show what is left" } else { "Click to show what is used" })
-        .on_press(move |s: &mut Ui| ui::set_show_used(s, !show_used))
+        .label(format!("{}: {}", limit.label, model::percent(limit, show_used)));
+    if let Some(chart) = on.then(|| burn_view::expanded(s, l, snapshot, limit)).flatten() {
+        return body.child(chart);
+    }
+    let share = if show_used { limit.used / 100.0 } else { limit.left() / 100.0 };
+    // The tick marks an even pace: where the fill would be if use had kept step with time.
+    let tick = limit.elapsed(now).filter(|_| !limit.used_up()).map(|elapsed| if show_used { elapsed } else { 1.0 - elapsed });
+    let mut notes = row().w_full().center_y().child(text(reset_note(limit, now)).font(digits(11.0, 400.0)).color(l.dim)).child(spacer());
+    if let Some(warning) = runway_note(l, limit, now) {
+        notes = notes.child(warning);
+    }
+    body = body.child(meter(l, share, l.fill(severity), tick)).child(notes);
+    if on {
+        body
+    } else {
+        body.hover(l.hover).help("Click to show its history").on_press(move |s: &mut Ui| ui::select_limit(s, &id))
+    }
 }
 
 fn extra_row(l: &Look, extra: &ExtraUsage) -> El {
@@ -483,7 +516,7 @@ fn extra_row(l: &Look, extra: &ExtraUsage) -> El {
         Some(limit) => format!("{} of {}", amount(extra.used), amount(limit)),
         None => amount(extra.used),
     };
-    let mut body = col().key("limit-extra").w_full().gap(7.0).child(
+    let mut body = col().key("limit-extra").w_full().padding(ROW_PAD).gap(7.0).child(
         row()
             .w_full()
             .center_y()
@@ -521,36 +554,46 @@ fn usage(s: &Ui, l: &Look) -> El {
         return body.child(text("No Claude Code activity in this period.").key("usage-empty").font(font(12.0, 400.0)).color(l.dim));
     }
 
-    let figure = |key: &'static str, value: String, caption: &'static str, end: bool| {
-        let cell = col().key(key).gap(1.0).child(text(value).font(digits(22.0, 700.0).tracking(-0.4)).color(l.text)).child(text(caption).font(font(11.0, 400.0)).color(l.dim));
-        if end { cell.items_end() } else { cell }
+    // One reading: the range's totals, or the bar under the pointer. It keeps its place and its
+    // shape, so moving across the chart changes only the words in it.
+    let hovered = s.hovered.and_then(|at| view.bars.get(at));
+    let (when, tokens, cost) = match hovered {
+        Some(bar) => (bar.label.clone(), bar.tokens, model::money(bar.cost)),
+        None => (s.range.span().to_owned(), view.total(), view.cost_label()),
     };
+    let parts = format!(
+        "Input {} · Output {} · Cache write {} · Cache read {}",
+        model::tokens(view.tokens[INPUT]),
+        model::tokens(view.tokens[OUTPUT]),
+        model::tokens(view.tokens[CACHE_WRITE_5M] + view.tokens[CACHE_WRITE_1H]),
+        model::tokens(view.tokens[CACHE_READ])
+    );
+    let caption = |words: String, live: bool| text(words).font(digits(11.0, if live { 500.0 } else { 400.0 })).color(if live { l.text } else { l.dim });
+    let figure = |words: String| text(words).font(digits(20.0, 700.0).tracking(-0.4)).color(l.text);
     body = body.child(
-        row()
+        col()
             .key("totals")
             .w_full()
-            .child(figure("total-tokens", model::tokens(view.total()), "tokens", false))
-            .child(spacer())
-            .child(figure("total-cost", view.cost_label(), "at API prices", true)),
+            .gap(1.0)
+            .help(parts)
+            .child(row().w_full().child(caption(when, hovered.is_some())).child(spacer()).child(caption("at API prices".to_owned(), false)))
+            .child(
+                row()
+                    .w_full()
+                    .items_end()
+                    .gap(5.0)
+                    .child(figure(model::tokens(tokens)).key("total-tokens"))
+                    .child(text("tokens").font(font(12.0, 400.0)).color(l.dim).pb(2.0))
+                    .child(spacer())
+                    .child(figure(cost).key("total-cost")),
+            ),
     );
     body = body.child(chart(l, view, s.hovered));
-
-    let part = |name: &'static str, count: u64| col().grow(1.0).gap(1.0).child(text(name).font(font(10.5, 400.0)).color(l.faint)).child(text(model::tokens(count)).font(digits(12.0, 500.0)).color(l.text));
-    body = body.child(
-        row()
-            .key("parts")
-            .w_full()
-            .child(part("Input", view.tokens[INPUT]))
-            .child(part("Output", view.tokens[OUTPUT]))
-            .child(part("Cache write", view.tokens[CACHE_WRITE_5M] + view.tokens[CACHE_WRITE_1H]))
-            .child(part("Cache read", view.tokens[CACHE_READ])),
-    );
     body.child(models(l, view))
 }
 
 fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
-    let peak_at = view.bars.iter().enumerate().max_by_key(|(_, bar)| bar.tokens).map_or(0, |(at, _)| at);
-    let peak = view.bars.get(peak_at).map_or(0, |bar| bar.tokens).max(1) as f32;
+    let peak = view.bars.iter().map(|bar| bar.tokens).max().unwrap_or(0).max(1) as f32;
     let few = view.bars.len() <= 7;
     let gap = if few { 6.0 } else { 2.0 };
     let mut bars = row()
@@ -604,26 +647,7 @@ fn chart(l: &Look, view: &RangeView, hovered: Option<usize>) -> El {
         }
     }
 
-    // One line reads a single bar: the one under the pointer, or the busiest. It keeps its
-    // place and its shape, so moving across the chart changes only the words in it.
-    let (lead, bar) = match hovered.and_then(|at| view.bars.get(at)) {
-        Some(bar) => ("", Some(bar)),
-        None => ("Peak · ", view.bars.get(peak_at)),
-    };
-    let (name, tokens, cost) = bar.map_or_else(Default::default, |bar| (format!("{lead}{}", bar.label), model::tokens(bar.tokens), model::money(bar.cost)));
-    let readout = row()
-        .key("readout")
-        .w_full()
-        .h(26.0)
-        .px(8.0)
-        .radius(6.0)
-        .fill(l.card)
-        .center_y()
-        .child(text(name).font(digits(11.5, 500.0)).color(if hovered.is_some() { l.text } else { l.dim }))
-        .child(spacer())
-        .child(text(format!("{tokens} tokens")).font(digits(11.5, 400.0)).color(l.dim))
-        .child(row().w(58.0).justify_end().child(text(cost).font(digits(11.5, 500.0)).color(l.text)));
-    col().w_full().gap(5.0).child(bars).child(axis).child(el().h(3.0)).child(readout)
+    col().w_full().gap(5.0).child(bars).child(axis)
 }
 
 fn models(l: &Look, view: &RangeView) -> El {

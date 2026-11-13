@@ -10,8 +10,8 @@ pub const WARNING_LEFT: f64 = 30.0;
 pub const CRITICAL_LEFT: f64 = 10.0;
 /// A limit's pace is read only once this share of its window has passed and this much of it is
 /// used: before that a single request projects to nonsense.
-const PACE_MIN_ELAPSED: f64 = 0.05;
-const PACE_MIN_USED: f64 = 5.0;
+pub const PACE_MIN_ELAPSED: f64 = 0.05;
+pub const PACE_MIN_USED: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -46,14 +46,7 @@ impl Limit {
     }
 
     pub fn severity(&self) -> Severity {
-        let left = self.left().round();
-        if left <= CRITICAL_LEFT {
-            Severity::Critical
-        } else if left <= WARNING_LEFT {
-            Severity::Warning
-        } else {
-            Severity::Normal
-        }
+        severity(self.left())
     }
 
     /// Seconds until the reset, when one is scheduled and still ahead.
@@ -76,6 +69,18 @@ impl Limit {
         let spent_seconds = elapsed * self.window as f64;
         let runway = ((100.0 - self.used) * spent_seconds / self.used) as i64;
         (runway < resets_in).then_some(runway)
+    }
+}
+
+/// How a limit with `left` percent remaining reads.
+pub fn severity(left: f64) -> Severity {
+    let left = left.round();
+    if left <= CRITICAL_LEFT {
+        Severity::Critical
+    } else if left <= WARNING_LEFT {
+        Severity::Warning
+    } else {
+        Severity::Normal
     }
 }
 
@@ -183,6 +188,27 @@ pub fn menu_bar_limits(snapshot: &Snapshot, metric: MenuBarMetric, models: bool)
     main.into_iter().chain(scoped).collect()
 }
 
+/// The limit the panel's chart shows until another is picked: the weekly one with the least
+/// left, as that is the one a week of work runs into, else the first.
+pub fn chart_default(snapshot: &Snapshot) -> Option<&Limit> {
+    let weekly = snapshot.limits.iter().filter(|l| l.window >= 86_400);
+    weekly.min_by(|a, b| a.left().total_cmp(&b.left())).or_else(|| snapshot.limits.first())
+}
+
+/// A limit's name split in two for the panel: "Fable weekly" is "Weekly" for Fable, and with
+/// such limits beside it, the plan-wide "Weekly" is for all models.
+pub fn names(limit: &Limit, any_scoped: bool) -> (String, Option<String>) {
+    if limit.scoped
+        && let Some(model) = limit.label.strip_suffix(" weekly")
+    {
+        return ("Weekly".to_owned(), Some(model.to_owned()));
+    }
+    if limit.id == "weekly" && any_scoped {
+        return (limit.label.clone(), Some("All models".to_owned()));
+    }
+    (limit.label.clone(), None)
+}
+
 /// The letter that names a limit in the menu bar: "S", "W", "F" for "Fable weekly".
 pub fn tag(limit: &Limit) -> char {
     limit.label.chars().next().map_or('?', |c| c.to_ascii_uppercase())
@@ -283,6 +309,18 @@ mod tests {
         let shown = menu_bar_limits(&snapshot, MenuBarMetric::Session, true);
         assert_eq!(shown.iter().map(|l| tag(l)).collect::<String>(), "WF");
         assert_eq!(menu_bar_limits(&snapshot, MenuBarMetric::Session, false).len(), 1);
+    }
+
+    #[test]
+    fn the_chart_starts_on_the_weekly_limit_with_the_least_left() {
+        let mut fable = limit("weekly-fable", 89.0, 60, 604_800);
+        fable.label = "Fable weekly".to_owned();
+        fable.scoped = true;
+        let snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 95.0, 60, 18_000), limit("weekly", 77.0, 60, 604_800), fable], extra: None, fetched_at: NOW };
+        assert_eq!(chart_default(&snapshot).unwrap().id, "weekly-fable");
+        assert_eq!(names(&snapshot.limits[2], true), ("Weekly".to_owned(), Some("Fable".to_owned())));
+        assert_eq!(names(&snapshot.limits[1], true).1.as_deref(), Some("All models"));
+        assert_eq!(names(&snapshot.limits[1], false).1, None);
     }
 
     #[test]

@@ -103,6 +103,32 @@ pub fn clock(unix: i64, seconds: bool) -> String {
     if seconds { format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec) } else { format!("{:02}:{:02}", tm.tm_hour, tm.tm_min) }
 }
 
+/// The system time zone's offset from UTC at a Unix time, in seconds.
+fn utc_offset(unix: i64) -> i64 {
+    let time: libc::time_t = unix;
+    // SAFETY: as `local`.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&time, &mut tm);
+        tm
+    };
+    tm.tm_gmtoff as i64
+}
+
+/// Unix seconds of the start of `hour` on the local day `day` (as [`Local::day`]).
+pub fn local_hour_start(day: i32, hour: u8) -> i64 {
+    let wall = day as i64 * 86_400 + hour as i64 * 3600;
+    // The offset at a first guess, then at the moment it gives, in case the two straddle a
+    // daylight saving change.
+    let guess = wall - utc_offset(wall);
+    wall - utc_offset(guess)
+}
+
+/// A moment within the week: "Wed 14:05".
+pub fn weekday_clock(unix: i64) -> String {
+    format!("{} {}", WEEKDAYS[local(unix).weekday as usize], clock(unix, false))
+}
+
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -149,6 +175,16 @@ mod tests {
         let day = days_from_civil(2026, 11, 12) as i32;
         let date = local_day(day);
         assert_eq!((date.month, date.day_of_month, date.weekday), (11, 12, 4));
+    }
+
+    #[test]
+    fn a_local_hour_starts_where_the_clock_says() {
+        for unix in [1_794_484_800, 1_794_484_800 + 13 * 3600 + 1234, 1_774_000_000] {
+            let at = local(unix);
+            let start = local_hour_start(at.day, at.hour);
+            assert!(start <= unix && unix - start < 3600, "{unix} is in the hour from {start}");
+            assert_eq!(clock(start, true).get(3..), Some("00:00"));
+        }
     }
 
     #[test]

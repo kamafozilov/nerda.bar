@@ -1,5 +1,5 @@
-//! The background thread: asks the provider for its limits on a schedule, reads the session
-//! logs, and hands both to the UI. Nothing here touches the main thread.
+//! The background thread: asks the provider for its limits on a schedule, keeps their history,
+//! reads the session logs, and hands all of it to the UI. Nothing here touches the main thread.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::burn::History;
 use crate::claude;
 use crate::model::{Problem, Snapshot};
 use crate::prices::Prices;
@@ -40,6 +41,8 @@ pub enum Event {
     Refreshing,
     Limits(Result<Snapshot, Problem>),
     Stats(Arc<StatsView>),
+    /// Every limit's readings, after one was added.
+    History(Arc<History>),
 }
 
 /// What survives a relaunch: the last limits, and a pause the provider asked for.
@@ -79,6 +82,8 @@ pub fn spawn(data_dir: PathBuf, refresh_every: i64, on_event: impl Fn(Event) + S
     let run = move || {
         let agent = claude::agent();
         let mut cache = Cache::load(&data_dir);
+        let mut history = History::load(&data_dir);
+        on_event(Event::History(Arc::new(history.clone())));
         let mut prices = Prices::load(&data_dir);
         let mut scanner = Scanner::new(&claude::config_dirs());
         let (mut next_refresh, mut last_refresh, mut last_scan) = (0i64, 0i64, 0i64);
@@ -104,6 +109,9 @@ pub fn spawn(data_dir: PathBuf, refresh_every: i64, on_event: impl Fn(Event) + S
                     Ok(snapshot) => {
                         cache = Cache { snapshot: Some(snapshot.clone()), paused_until: 0 };
                         cache.save(&data_dir);
+                        history.record(snapshot);
+                        history.save(&data_dir);
+                        on_event(Event::History(Arc::new(history.clone())));
                     }
                     Err(Problem::RateLimited { until }) => {
                         cache.paused_until = *until;
