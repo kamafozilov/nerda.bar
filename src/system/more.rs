@@ -1,0 +1,351 @@
+//! The disk, the network, the battery and the GPU, read on the sampler's thread beside the CPU
+//! and memory: rates from the difference of two readings of a counter, the network's use since
+//! midnight, the battery's charge kept for a week on disk, and each app's disk use over the last
+//! hour.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use super::apps::AppUsage;
+use super::history::{Point, Series};
+use super::net::Interface;
+use super::{battery, disk, gpu, net};
+
+/// How often the volumes are listed: it touches every mounted file system, and asks each how
+/// much it could free, which takes a few milliseconds.
+const VOLUMES_EVERY: f64 = 30.0;
+/// A point of charge history every this many seconds, kept this long.
+const CHARGE_STEP: i64 = 300;
+const CHARGE_KEEP: i64 = 7 * 86_400;
+const CHARGE_FILE: &str = "battery.json";
+/// The window each app's disk use is summed over.
+const APP_DISK_WINDOW: f64 = 3600.0;
+
+/// The startup disk first, then every other volume, and how fast the disks read and write.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskView {
+    pub volumes: Vec<disk::Volume>,
+    /// Bytes a second, over the time since the reading before.
+    pub read: f64,
+    pub write: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetView {
+    pub interfaces: Vec<Interface>,
+    /// The interface carrying the default route.
+    pub primary: Option<String>,
+    /// Bytes a second, over the time since the reading before.
+    pub down: f64,
+    pub up: f64,
+    /// Bytes since `since`: local midnight, or the first reading today when that came later.
+    pub received_today: u64,
+    pub sent_today: u64,
+    pub since: i64,
+}
+
+/// One point of the battery's history.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChargePoint {
+    /// Unix seconds.
+    pub at: i64,
+    /// From 0 to 1.
+    pub charge: f32,
+    pub plugged: bool,
+}
+
+/// What one reading adds to the view.
+pub struct Readings {
+    pub disk: Option<DiskView>,
+    pub net: Option<NetView>,
+    pub battery: Option<battery::Battery>,
+    pub gpu: Option<gpu::Gpu>,
+}
+
+/// The state the readings are measured against, kept on the sampler's thread.
+pub struct More {
+    data_dir: Option<PathBuf>,
+    disk_last: Option<(f64, disk::io::Io)>,
+    net_last: Option<(f64, (u64, u64))>,
+    volumes: Option<(f64, Vec<disk::Volume>)>,
+    /// The local day the network counts are for, when they start, and the counters then.
+    day: Option<(i32, i64, (u64, u64))>,
+    pub charge: Vec<ChargePoint>,
+    /// Each app's disk use per reading, oldest first, for the last hour.
+    app_disk: VecDeque<(f64, HashMap<String, AppUsage>)>,
+    pub disk_read: Series,
+    pub disk_write: Series,
+    pub net_down: Series,
+    pub net_up: Series,
+    pub gpu_busy: Series,
+}
+
+impl More {
+    pub fn new(data_dir: Option<PathBuf>) -> More {
+        let charge = data_dir.as_deref().map(load_charge).unwrap_or_default();
+        More {
+            data_dir,
+            disk_last: None,
+            net_last: None,
+            volumes: None,
+            day: None,
+            charge,
+            app_disk: VecDeque::new(),
+            disk_read: Series::default(),
+            disk_write: Series::default(),
+            net_down: Series::default(),
+            net_up: Series::default(),
+            gpu_busy: Series::default(),
+        }
+    }
+
+    /// Reads everything once, at `now`, and adds what held since `from` to the histories.
+    /// Reads what `wanted` asks for (`WANT_*` bits) once, at `now`, and adds what held since
+    /// `from` to the histories.
+    pub fn read(&mut self, from: f64, now: f64, wanted: u8) -> Readings {
+        let on = |bit: u8| wanted & bit != 0;
+        Readings {
+            disk: on(super::WANT_DISK).then(|| self.disk(from, now)).flatten(),
+            net: on(super::WANT_NETWORK).then(|| self.net(from, now)).flatten(),
+            battery: on(super::WANT_BATTERY).then(|| self.battery(now)).flatten(),
+            gpu: on(super::WANT_GPU).then(|| self.gpu(from, now)).flatten(),
+        }
+    }
+
+    fn disk(&mut self, from: f64, now: f64) -> Option<DiskView> {
+        let (read, write) = match (disk::io::counters(), self.disk_last) {
+            (Some(io), Some((at, before))) if now > at => {
+                let seconds = now - at;
+                self.disk_last = Some((now, io));
+                (io.read.saturating_sub(before.read) as f64 / seconds, io.written.saturating_sub(before.written) as f64 / seconds)
+            }
+            (Some(io), _) => {
+                self.disk_last = Some((now, io));
+                (0.0, 0.0)
+            }
+            (None, _) => (0.0, 0.0),
+        };
+        if self.disk_last.is_some() {
+            self.disk_read.add(from, now, read as f32);
+            self.disk_write.add(from, now, write as f32);
+        }
+        let stale = self.volumes.as_ref().is_none_or(|(at, _)| now - at >= VOLUMES_EVERY);
+        if stale {
+            self.volumes = Some((now, disk::volumes()));
+        }
+        let volumes = self.volumes.as_ref().map(|(_, volumes)| volumes.clone()).unwrap_or_default();
+        (!volumes.is_empty()).then_some(DiskView { volumes, read, write })
+    }
+
+    fn net(&mut self, from: f64, now: f64) -> Option<NetView> {
+        let interfaces = net::interfaces();
+        let totals = net::totals(&interfaces);
+        let (down, up) = match self.net_last {
+            // A counter that went backwards was reset (an interface came and went): no rate.
+            Some((at, before)) if now > at && totals.0 >= before.0 && totals.1 >= before.1 => ((totals.0 - before.0) as f64 / (now - at), (totals.1 - before.1) as f64 / (now - at)),
+            _ => (0.0, 0.0),
+        };
+        if self.net_last.is_some() {
+            self.net_down.add(from, now, down as f32);
+            self.net_up.add(from, now, up as f32);
+        }
+        self.net_last = Some((now, totals));
+        let today = crate::time::local(now as i64).day;
+        let (since, baseline) = match self.day {
+            Some((day, since, baseline)) if day == today && totals.0 >= baseline.0 && totals.1 >= baseline.1 => (since, baseline),
+            _ => {
+                // A new day, or the first reading: count from here.
+                let midnight = crate::time::local_hour_start(today, 0);
+                let since = if self.day.is_some_and(|(day, ..)| day + 1 == today) { midnight } else { now as i64 };
+                self.day = Some((today, since, totals));
+                (since, totals)
+            }
+        };
+        Some(NetView { primary: net::primary(), interfaces, down, up, received_today: totals.0 - baseline.0, sent_today: totals.1 - baseline.1, since })
+    }
+
+    fn battery(&mut self, now: f64) -> Option<battery::Battery> {
+        let battery = battery::read()?;
+        let at = now as i64;
+        let due = self.charge.last().is_none_or(|last| at - last.at >= CHARGE_STEP || last.plugged != battery.plugged);
+        if due {
+            self.charge.push(ChargePoint { at, charge: battery.charge, plugged: battery.plugged });
+            self.charge.retain(|p| at - p.at <= CHARGE_KEEP);
+            if let Some(dir) = &self.data_dir {
+                save_charge(dir, &self.charge);
+            }
+        }
+        Some(battery)
+    }
+
+    fn gpu(&mut self, from: f64, now: f64) -> Option<gpu::Gpu> {
+        let gpu = gpu::read()?;
+        self.gpu_busy.add(from, now, gpu.busy);
+        Some(gpu)
+    }
+
+    /// Adds a reading of the apps, and gives each app with its disk use over the last hour.
+    pub fn app_disk(&mut self, now: f64, apps: &[AppUsage]) -> Vec<AppUsage> {
+        let moved: HashMap<String, AppUsage> = apps.iter().filter(|app| app.disk > 0).map(|app| (key(app), app.clone())).collect();
+        self.app_disk.push_back((now, moved));
+        while self.app_disk.front().is_some_and(|(at, _)| now - at > APP_DISK_WINDOW) {
+            self.app_disk.pop_front();
+        }
+        let mut hour: HashMap<String, AppUsage> = HashMap::new();
+        for (_, reading) in &self.app_disk {
+            for (key, app) in reading {
+                hour.entry(key.clone()).and_modify(|sum| sum.disk += app.disk).or_insert_with(|| app.clone());
+            }
+        }
+        // Each app as it is now, with the hour's bytes, then the ones that have since quit.
+        let mut out: Vec<AppUsage> = apps
+            .iter()
+            .map(|app| {
+                let mut app = app.clone();
+                app.disk = hour.remove(&key(&app)).map_or(0, |sum| sum.disk);
+                app
+            })
+            .collect();
+        out.extend(hour.into_values().map(|mut app| {
+            app.memory = 0;
+            app.cpu = 0.0;
+            app
+        }));
+        out
+    }
+}
+
+fn key(app: &AppUsage) -> String {
+    app.path.as_ref().map_or_else(|| app.name.clone(), |path| path.to_string_lossy().into_owned())
+}
+
+fn load_charge(dir: &Path) -> Vec<ChargePoint> {
+    std::fs::read_to_string(dir.join(CHARGE_FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn save_charge(dir: &Path, points: &[ChargePoint]) {
+    if std::fs::create_dir_all(dir).is_ok()
+        && let Ok(text) = serde_json::to_string(points)
+    {
+        let _ = std::fs::write(dir.join(CHARGE_FILE), text);
+    }
+}
+
+/// The tiers of a series as the view keeps them.
+pub fn tiers(series: &Series, now: f64) -> [Vec<Option<Point>>; 3] {
+    [0, 1, 2].map(|tier| series.points(tier, now))
+}
+
+/// A made-up disk, network, battery and GPU for headless renders: a MacBook on battery in the
+/// afternoon, with a drive plugged in.
+pub fn demo(now: f64, view: &mut super::SystemView) {
+    let gb = 1_000_000_000u64;
+    let volume = |name: &str, mount: &str, format: &str, total: u64, free: u64, available: u64, internal: bool| disk::Volume {
+        name: name.to_owned(),
+        mount: PathBuf::from(mount),
+        format: format.to_owned(),
+        total,
+        free,
+        available,
+        internal,
+        ejectable: !internal,
+    };
+    view.disk = Some(DiskView {
+        volumes: vec![volume("Macintosh HD", "/", "APFS", 994 * gb, 341 * gb, 382 * gb, true), volume("T7 Shield", "/Volumes/T7 Shield", "ExFAT", 2000 * gb, 1400 * gb, 1400 * gb, false)],
+        read: 48e6,
+        write: 12e6,
+    });
+    let interface = |bsd: &str, name: &str, kind: net::Kind, address: Option<&str>| Interface {
+        bsd: bsd.to_owned(),
+        name: name.to_owned(),
+        kind,
+        address: address.map(str::to_owned),
+        active: address.is_some(),
+        received: 0,
+        sent: 0,
+    };
+    view.net = Some(NetView {
+        interfaces: vec![
+            interface("en0", "Wi-Fi", net::Kind::WiFi, Some("192.168.1.24")),
+            interface("en5", "Thunderbolt Ethernet", net::Kind::Ethernet, None),
+            interface("utun3", "VPN", net::Kind::Vpn, Some("10.8.0.2")),
+        ],
+        primary: Some("en0".to_owned()),
+        down: 2.4e6,
+        up: 380e3,
+        received_today: 4_800_000_000,
+        sent_today: 620_000_000,
+        since: crate::time::local_hour_start(crate::time::local(now as i64).day, 0),
+    });
+    view.battery = Some(battery::Battery {
+        charge: 0.73,
+        plugged: false,
+        charging: false,
+        full: false,
+        minutes_left: Some(220),
+        watts: Some(9.4),
+        cycle_count: Some(412),
+        health: Some(0.89),
+        condition: Some("Normal".to_owned()),
+        temperature: Some(31.0),
+    });
+    view.gpu = Some(gpu::Gpu { cores: Some(16), busy: 0.18, rendering: 0.16, geometry: 0.09, memory: 1_900 << 20 });
+
+    let (mut read, mut write, mut down, mut up, mut busy) = (Series::default(), Series::default(), Series::default(), Series::default(), Series::default());
+    let wave = |t: f64, seed: f64| ((t * 0.0021 + seed).sin() * 0.5 + (t * 0.013 + seed * 3.0).sin() * 0.3 + (t * 0.071).sin() * 0.2) * 0.5 + 0.5;
+    let mut t = now - 86_400.0;
+    while t < now {
+        let step = if now - t > 3600.0 { 60.0 } else { 2.0 };
+        let burst = if ((t / 2.0) as i64 % 211) < 4 { 1.0 } else { 0.0 };
+        read.add(t, t + step, (6e6 + wave(t, 0.7) * 10e6 + burst * 80e6) as f32);
+        write.add(t, t + step, (3e6 + wave(t, 1.9) * 6e6) as f32);
+        down.add(t, t + step, (1.2e6 + wave(t, 0.2) * 2.4e6 + burst * 4e6) as f32);
+        up.add(t, t + step, (0.2e6 + wave(t, 2.4) * 0.5e6) as f32);
+        busy.add(t, t + step, (0.08 + wave(t, 1.1).powf(3.0) * 0.4 + burst * 0.3) as f32);
+        t += step;
+    }
+    view.disk_read = tiers(&read, now);
+    view.disk_write = tiers(&write, now);
+    view.net_down = tiers(&down, now);
+    view.net_up = tiers(&up, now);
+    view.gpu_busy = tiers(&busy, now);
+    // A day of charge: down through the afternoon, plugged in overnight, down again since.
+    let mut charge = Vec::new();
+    let start = now as i64 - 7 * 86_400;
+    let mut at = start;
+    while at <= now as i64 {
+        let hour = ((at - start) / 3600) % 24;
+        let plugged = (11..15).contains(&hour);
+        let level = if plugged { 0.55 + (hour - 11) as f32 * 0.15 } else { (1.0 - ((hour + 9) % 24) as f32 * 0.035).clamp(0.2, 1.0) };
+        charge.push(ChargePoint { at, charge: level.min(1.0), plugged });
+        at += CHARGE_STEP * 3;
+    }
+    view.charge = std::sync::Arc::new(charge);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(name: &str, disk: u64) -> AppUsage {
+        AppUsage { name: name.to_owned(), path: None, memory: 1, cpu: 0.0, disk, processes: 1 }
+    }
+
+    #[test]
+    fn an_apps_disk_use_sums_over_the_last_hour() {
+        let mut more = More::new(None);
+        // A priming reading and the one right after it both count.
+        more.app_disk(0.0, &[app("Xcode", 700), app("Mail", 5)]);
+        let now = more.app_disk(0.3, &[app("Xcode", 300), app("Mail", 0)]);
+        let disk = |apps: &[AppUsage], name: &str| apps.iter().find(|a| a.name == name).map(|a| a.disk);
+        assert_eq!(disk(&now, "Xcode"), Some(1000));
+        assert_eq!(disk(&now, "Mail"), Some(5));
+        // An app that quit still counts until its hour is up, then falls away.
+        let later = more.app_disk(1800.0, &[app("Mail", 0)]);
+        assert_eq!(disk(&later, "Xcode"), Some(1000));
+        let much_later = more.app_disk(3700.0, &[app("Mail", 0)]);
+        assert_eq!(disk(&much_later, "Xcode"), None);
+    }
+}

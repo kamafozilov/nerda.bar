@@ -7,14 +7,22 @@
 //! each app uses is read only while the panel shows it, a few milliseconds a second.
 
 pub mod apps;
+pub mod battery;
+pub mod disk;
+pub mod gpu;
 pub mod history;
+mod iokit;
 mod mac;
+mod more;
+pub mod net;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use apps::{AppUsage, Apps};
+pub use more::{ChargePoint, DiskView, NetView};
 use history::{Point, Series};
 
 /// How often the measures are read.
@@ -172,9 +180,27 @@ pub struct SystemView {
     pub cpu_total: [Vec<Option<Point>>; 3],
     pub cpu_system: [Vec<Option<Point>>; 3],
     pub memory_used: [Vec<Option<Point>>; 3],
-    /// What each app uses, read only while the panel shows this Mac's tabs.
+    /// What each app uses: its disk use summed over the last hour. Read every second while the
+    /// panel shows this Mac's tabs, else every [`APPS_EVERY`] seconds.
     pub apps: Option<Arc<Vec<AppUsage>>>,
+    pub disk: Option<DiskView>,
+    /// Bytes a second, per tier.
+    pub disk_read: [Vec<Option<Point>>; 3],
+    pub disk_write: [Vec<Option<Point>>; 3],
+    pub net: Option<NetView>,
+    pub net_down: [Vec<Option<Point>>; 3],
+    pub net_up: [Vec<Option<Point>>; 3],
+    /// `None` on a Mac without a battery.
+    pub battery: Option<battery::Battery>,
+    /// The last week of the battery's charge.
+    pub charge: Arc<Vec<ChargePoint>>,
+    pub gpu: Option<gpu::Gpu>,
+    pub gpu_busy: [Vec<Option<Point>>; 3],
 }
+
+/// How often the apps are read while the panel doesn't show them: often enough for their disk
+/// use over the last hour, rarely enough to cost nothing.
+const APPS_EVERY: f64 = 20.0;
 
 impl SystemView {
     /// The last `count` readings of `series` at the finest tier, for a menu bar graph.
@@ -186,13 +212,25 @@ impl SystemView {
     }
 }
 
+/// The measures beyond the CPU and memory that something shows, as bits: only these are read.
+pub const WANT_DISK: u8 = 1;
+pub const WANT_NETWORK: u8 = 2;
+pub const WANT_BATTERY: u8 = 4;
+pub const WANT_GPU: u8 = 8;
+
 pub struct Sampler {
     rates: Sender<Rate>,
+    wanted: Arc<AtomicU8>,
 }
 
 impl Sampler {
     pub fn set_rate(&self, rate: Rate) {
         let _ = self.rates.send(rate);
+    }
+
+    /// Which of the disk, network, battery and GPU to read, as `WANT_*` bits.
+    pub fn set_wanted(&self, wanted: u8) {
+        self.wanted.store(wanted, Ordering::Relaxed);
     }
 }
 
@@ -200,12 +238,17 @@ fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
-pub fn spawn(on_view: impl Fn(Arc<SystemView>) + Send + 'static) -> Sampler {
+pub fn spawn(data_dir: Option<std::path::PathBuf>, on_view: impl Fn(Arc<SystemView>) + Send + 'static) -> Sampler {
     let (rates, inbox) = mpsc::channel::<Rate>();
+    let wanted = Arc::new(AtomicU8::new(WANT_DISK | WANT_NETWORK | WANT_BATTERY | WANT_GPU));
+    let wants = wanted.clone();
     let run = move || {
         let host = mac::Host::new();
         let machine = Arc::new(Machine::read());
         let mut apps = Apps::new();
+        let mut more = more::More::new(data_dir);
+        let mut apps_at = f64::NEG_INFINITY;
+        let mut app_usage: Option<Arc<Vec<AppUsage>>> = None;
         let cores = machine.performance_cores + machine.efficiency_cores;
         let mut rate = Rate::Off;
         let (mut cpu_total, mut cpu_system, mut memory_used) = (Series::default(), Series::default(), Series::default());
@@ -251,14 +294,20 @@ pub fn spawn(on_view: impl Fn(Arc<SystemView>) + Send + 'static) -> Sampler {
                 _ => None,
             };
             let memory = Memory::read(&host, machine.memory);
-            let app_usage = (rate == Rate::Live).then(|| {
-                // CPU time needs an earlier reading to measure against.
-                if !apps.primed() {
-                    apps.read(cores);
+            // Off the panel, the apps are read only for the disk tab's hour of disk use.
+            let disk_wanted = wants.load(Ordering::Relaxed) & WANT_DISK != 0;
+            if rate == Rate::Live || (disk_wanted && now - apps_at >= APPS_EVERY) {
+                // CPU time needs an earlier reading to measure against; only the panel shows it.
+                if rate == Rate::Live && !apps.primed() {
+                    // This reading's disk bytes cover the time since the last one: keep them.
+                    let first = apps.read(cores);
+                    more.app_disk(now, &first);
                     std::thread::sleep(Duration::from_millis(300));
                 }
-                Arc::new(apps.read(cores))
-            });
+                let read = apps.read(cores);
+                apps_at = now;
+                app_usage = Some(Arc::new(more.app_disk(now, &read)));
+            }
             // A reading stands for the time since the last one, unless the Mac slept or nothing
             // read for long between them: then only for one step.
             let since = last.as_ref().map_or(now - step, |(at, _)| *at);
@@ -273,7 +322,8 @@ pub fn spawn(on_view: impl Fn(Arc<SystemView>) + Send + 'static) -> Sampler {
             if let Some(ticks) = ticks {
                 last = Some((now, ticks));
             }
-            let tiers = |series: &Series| [0, 1, 2].map(|tier| series.points(tier, now));
+            let readings = more.read(from, now, wants.load(Ordering::Relaxed));
+            let tiers = |series: &Series| more::tiers(series, now);
             on_view(Arc::new(SystemView {
                 at: now,
                 machine: machine.clone(),
@@ -282,13 +332,23 @@ pub fn spawn(on_view: impl Fn(Arc<SystemView>) + Send + 'static) -> Sampler {
                 cpu_total: tiers(&cpu_total),
                 cpu_system: tiers(&cpu_system),
                 memory_used: tiers(&memory_used),
-                apps: app_usage,
+                apps: app_usage.clone(),
+                disk: readings.disk,
+                disk_read: tiers(&more.disk_read),
+                disk_write: tiers(&more.disk_write),
+                net: readings.net,
+                net_down: tiers(&more.net_down),
+                net_up: tiers(&more.net_up),
+                battery: readings.battery,
+                charge: Arc::new(more.charge.clone()),
+                gpu: readings.gpu,
+                gpu_busy: tiers(&more.gpu_busy),
             }));
             next = now + step;
         }
     };
     std::thread::Builder::new().name("nerda-bar-system".to_owned()).spawn(run).expect("the system thread starts");
-    Sampler { rates }
+    Sampler { rates, wanted }
 }
 
 /// A made-up reading and history for headless renders: a working afternoon on an M1 Pro.
@@ -310,7 +370,7 @@ pub fn demo(now: f64) -> SystemView {
         t += step;
     }
     let tiers = |series: &Series| [0, 1, 2].map(|tier| series.points(tier, now));
-    SystemView {
+    let mut view = SystemView {
         at: now,
         cpu: Some(Cpu {
             user: 0.21,
@@ -332,7 +392,19 @@ pub fn demo(now: f64) -> SystemView {
         cpu_system: tiers(&cpu_system),
         memory_used: tiers(&memory_used),
         apps: Some(Arc::new(demo_apps())),
-    }
+        disk: None,
+        disk_read: Default::default(),
+        disk_write: Default::default(),
+        net: None,
+        net_down: Default::default(),
+        net_up: Default::default(),
+        battery: None,
+        charge: Arc::new(Vec::new()),
+        gpu: None,
+        gpu_busy: Default::default(),
+    };
+    more::demo(now, &mut view);
+    view
 }
 
 /// Apps a working day might have open, with bundles most Macs have, for their icons.
@@ -342,6 +414,7 @@ fn demo_apps() -> Vec<AppUsage> {
         path: Some(std::path::PathBuf::from(path)),
         memory: memory_mb << 20,
         cpu,
+        disk: memory_mb << 20,
         processes,
     };
     vec![

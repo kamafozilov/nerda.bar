@@ -215,6 +215,15 @@ impl Scanner {
         true
     }
 
+    /// Counts `tokens` of `model` at `at`, for logs read elsewhere (Codex's), which carry no
+    /// message ids to tell copies apart.
+    pub fn record(&mut self, at: i64, model: &str, tokens: [u32; 5]) {
+        let local = time::local(at);
+        let key = CellKey { day: local.day, hour: local.hour, model: self.model_index(model), context: 0 };
+        let cell = self.cell(key);
+        self.add(cell, tokens);
+    }
+
     fn model_index(&mut self, model: &str) -> u16 {
         if let Some(at) = self.models.iter().position(|m| m == model) {
             return at as u16;
@@ -303,11 +312,12 @@ impl Scanner {
                     let date = time::local_day(first + at);
                     format!("{} {} {}", WEEKDAYS[date.weekday as usize], date.day_of_month, MONTHS[date.month as usize - 1])
                 };
-                Bar { label, tokens: 0, cost: 0.0 }
+                Bar { label, tokens: 0, cost: 0.0, parts: [0; 4] }
             })
             .collect();
         let mut view = RangeView { tokens: [0; 5], cost: 0.0, unpriced: false, bars: Vec::new(), axis: Vec::new(), axis_per_bar: false, models: Vec::new() };
         let mut by_model: HashMap<String, ModelRow> = HashMap::new();
+        let mut by_bar: HashMap<(usize, &str), u64> = HashMap::new();
         for (key, tokens) in &self.cells {
             let total: u64 = tokens.iter().sum();
             if key.day < first || key.day > today || total == 0 {
@@ -320,16 +330,23 @@ impl Scanner {
             }
             view.cost += cost.unwrap_or(0.0);
             view.unpriced |= cost.is_none();
-            let bar = &mut bars[if hourly { key.hour as usize } else { (key.day - first) as usize }];
+            let at = if hourly { key.hour as usize } else { (key.day - first) as usize };
+            let bar = &mut bars[at];
             bar.tokens += total;
             bar.cost += cost.unwrap_or(0.0);
             let name = display_name(model);
+            *by_bar.entry((at, name)).or_default() += total;
             let row = by_model.entry(name.to_owned()).or_insert_with(|| ModelRow { name: name.to_owned(), tokens: 0, cost: Some(0.0) });
             row.tokens += total;
             row.cost = row.cost.zip(cost).map(|(sum, cost)| sum + cost);
         }
         view.models = by_model.into_values().collect();
         view.models.sort_by(|a, b| b.cost.unwrap_or(0.0).total_cmp(&a.cost.unwrap_or(0.0)).then(b.tokens.cmp(&a.tokens)).then_with(|| a.name.cmp(&b.name)));
+        // Each bar split as the list under the chart is: its first three models, then the rest.
+        for ((at, name), tokens) in by_bar {
+            let part = view.models.iter().position(|row| row.name == name).unwrap_or(SERIES).min(SERIES);
+            bars[at].parts[part] += tokens;
+        }
         if hourly {
             view.axis = ["00:00", "06:00", "12:00", "18:00", "24:00"].map(str::to_owned).to_vec();
         } else if days <= 7 {
@@ -383,12 +400,18 @@ fn collect_logs(dir: &Path, cutoff: i64, depth: usize, out: &mut Vec<(PathBuf, u
     }
 }
 
+/// Models the usage chart colours on their own; the rest share one colour.
+pub const SERIES: usize = 3;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bar {
     /// "14:00", or "Thu 12 Nov".
     pub label: String,
     pub tokens: u64,
     pub cost: f64,
+    /// The tokens of the range's first [`SERIES`] models, in the order the list shows them,
+    /// and then of all the others.
+    pub parts: [u64; SERIES + 1],
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -1,164 +1,238 @@
-//! The panel's tabs for this Mac: the CPU and memory, each as a headline number, its history as
-//! an area chart at three resolutions, its parts, and the apps that use the most of it.
+//! The panel's tabs for this Mac. Each has a header, what is in use now as a large number with
+//! its parts, its history as an area chart at three resolutions, and the apps behind it.
 //!
 //! Charts follow one scheme: a share from 0 to 100% on a single axis, series in the fixed order
-//! of `Look::series`, a 1.75-point line over a faint fill, hairlines at 50% and 100%, and a
-//! readout under the chart for the point under the pointer or, without one, the peak.
+//! of `Look::series`, a line over a faint fill, hairlines at 50% and 100%, and a readout under
+//! the chart for the point under the pointer or, without one, the peak.
 
-use rune::{Color, El, Shape, canvas, col, el, row, spacer, text};
+use rune::{Color, El, Icon, Shape, canvas, col, el, row, spacer, text};
 
+use crate::icons;
+use crate::look::{self, INNER_W, Look, PAD_X, caption, digits, figure, font, hairline, legend_value, section, section_title, segment, segments};
 use crate::system::apps::{self, AppUsage};
 use crate::system::history::{self, Point, TIERS};
 use crate::system::{Pressure, SystemView};
 use crate::time;
 use crate::ui::{self, Tab, Ui};
-use crate::view::{INNER_W, Look, PAD_X, digits, font, segment, segments, title_bar};
 
-const CHART_H: f32 = 76.0;
+const CHART_H: f32 = 64.0;
 const LINE: f32 = 1.75;
-const CORE_H: f32 = 40.0;
+const CORE_H: f32 = 44.0;
 const APP_ROWS: usize = 5;
 const ICON: f32 = 22.0;
 
-pub fn header(s: &Ui, l: &Look, tab: Tab) -> El {
-    let machine = s.system.as_ref().map(|view| view.machine.clone());
-    let chip = match tab {
-        Tab::Memory => machine.as_ref().map(|m| ui::system_bytes(m.memory)),
-        _ => machine.as_ref().map(|m| m.chip.clone()),
+/// A tab's icon in the rail and on its header's tile.
+pub fn glyph(tab: Tab) -> &'static Icon {
+    match tab {
+        Tab::Memory => &icons::MEMORY_STICK,
+        Tab::Disk => &icons::HARD_DRIVE,
+        Tab::Network => &icons::ARROW_DOWN_UP,
+        Tab::Battery => &icons::BATTERY_MEDIUM,
+        Tab::Gpu => &icons::GPU,
+        _ => &icons::CPU,
+    }
+}
+
+pub fn tab(s: &Ui, l: &Look, tab: Tab) -> El {
+    let view = s.system.as_deref();
+    let machine = view.map(|view| &view.machine);
+    let (badge, words) = match tab {
+        Tab::Disk | Tab::Network | Tab::Battery | Tab::Gpu => crate::mac_view::header_words(s, tab),
+        Tab::Memory => (
+            machine.map(|m| ui::system_bytes(m.memory)),
+            machine.filter(|m| m.chip.starts_with('M')).map_or(String::new(), |_| "Unified memory, shared with the GPU".to_owned()),
+        ),
+        _ => (
+            machine.map(|m| m.chip.clone()),
+            machine.map_or(String::new(), |m| {
+                let cores = m.performance_cores + m.efficiency_cores;
+                match m.booted_at {
+                    Some(at) => format!("{cores} cores · up {}", time::span(s.now - at)),
+                    None => format!("{cores} cores"),
+                }
+            }),
+        ),
     };
-    title_bar(l, tab.label(), chip.as_deref())
+    let header = look::header(l, glyph(tab), 18.0, l.dim, l.chip, if tab == Tab::Network { tab.label() } else if tab == Tab::Memory { tab.short() } else { tab.label() }, badge.as_deref(), look::subtitle(l, words, None), None);
+    let body = match tab {
+        Tab::Memory => memory(s, l),
+        Tab::Disk => crate::mac_view::disk(s, l),
+        Tab::Network => crate::mac_view::network(s, l),
+        Tab::Battery => crate::mac_view::battery(s, l),
+        Tab::Gpu => crate::mac_view::gpu(s, l),
+        _ => cpu(s, l),
+    };
+    col().key(tab.id()).w_full().child(header).child(body)
+}
+
+pub(crate) fn reading(l: &Look, key: &'static str) -> El {
+    col().w_full().px(PAD_X).pt(8.0).pb(16.0).child(text("Reading this Mac…").key(key).font(font(12.5, 400.0)).color(l.dim))
+}
+
+/// What is in use now: the large number, and its parts under it.
+pub(crate) fn now_block(key: &'static str) -> El {
+    col().key(key).w_full().px(PAD_X).pt(8.0).pb(12.0).gap(10.0)
+}
+
+/// The headline: a large number and what it counts, a step quieter.
+pub(crate) fn big_number(l: &Look, number: &str, unit: &str) -> El {
+    row()
+        .items_end()
+        .gap(4.0)
+        .child(text(number.to_owned()).font(figure(32.0)).color(l.text))
+        .child(text(unit.to_owned()).font(font(13.0, 400.0)).color(l.dim).pb(5.0))
 }
 
 pub fn cpu(s: &Ui, l: &Look) -> El {
-    let body = col().key("cpu").w_full().px(PAD_X).pb(14.0).gap(14.0);
     let Some((view, cpu)) = s.system.as_ref().and_then(|view| Some((view, view.cpu.as_ref()?))) else {
-        return body.child(text("Reading this Mac…").key("cpu-loading").font(font(12.5, 400.0)).color(l.dim));
+        return reading(l, "cpu-loading");
     };
-    let [apps, system, _] = l.series;
-    let machine = &view.machine;
-    let cores = machine.performance_cores + machine.efficiency_cores;
+    let [apps_color, system_color, _] = l.series;
+    let idle = (1.0 - cpu.total()).max(0.0);
 
-    let hero = row()
-        .key("cpu-hero")
-        .w_full()
-        .items_end()
+    // The share in use as one bar: apps, then the system, on the idle track.
+    let split = |share: f32| (INNER_W * share.clamp(0.0, 1.0)).round();
+    let mut bar = el().key("cpu-split").w(INNER_W).h(6.0).radius(3.0).fill(l.track);
+    let (apps_w, system_w) = (split(cpu.user), split(cpu.system));
+    if apps_w + system_w >= 1.0 {
+        bar = bar.child(row().absolute(0.0, 0.0).h(6.0).clip_rounded(3.0).child(el().w(apps_w).h(6.0).fill(apps_color)).child(el().w(system_w).h(6.0).fill(system_color)));
+    }
+    let load = |value: f64, unit: &str| row().items_end().gap(3.0).child(text(format!("{value:.2}")).font(digits(12.5, 700.0)).color(l.text)).child(text(unit.to_owned()).font(font(10.0, 400.0)).color(l.faint));
+    let now = now_block("cpu-hero")
+        .child(big_number(l, &format!("{:.0}%", cpu.total() * 100.0), "in use"))
+        .child(bar)
         .child(
-            big_number(l, &format!("{:.0}", cpu.total() * 100.0), "%", &format!("in use · {cores} cores · load {:.2}", cpu.load[0]))
-                .help(format!("Load average: {:.2} over 1 minute, {:.2} over 5, {:.2} over 15", cpu.load[0], cpu.load[1], cpu.load[2])),
+            row()
+                .w_full()
+                .gap(16.0)
+                .child(legend_value(l, apps_color, "Apps", percent(cpu.user)))
+                .child(legend_value(l, system_color, "System", percent(cpu.system)))
+                .child(legend_value(l, l.track, "Idle", percent(idle))),
         )
-        .child(spacer())
-        .child(col().gap(5.0).pb(3.0).child(legend_row(l, apps, "Apps", percent(cpu.user))).child(legend_row(l, system, "System", percent(cpu.system))));
+        .child(
+            row()
+                .key("load")
+                .w_full()
+                .center_y()
+                .help("How many tasks were ready to run, on average")
+                .child(caption(l, "Load average"))
+                .child(spacer())
+                .child(row().gap(10.0).items_end().child(load(cpu.load[0], "1 min")).child(load(cpu.load[1], "5 min")).child(load(cpu.load[2], "15 min"))),
+        );
 
     let tier = s.tier;
     let (total, sys) = (&view.cpu_total[tier], &view.cpu_system[tier]);
-    let chart = area_chart(l, "cpu-chart", &[Layer { top: total, bottom: Some(sys), color: apps }, Layer { top: sys, bottom: None, color: system }], s.point);
-    let read = |at: usize| total[at].map(|p| (p, sys[at].map_or(0.0, |p| p.avg)));
-    let readout = match s.point.and_then(|at| Some((at, read(at)?))) {
-        Some((at, (p, sys))) => readout(l, point_time(view, tier, at), true, format!("apps {} · system {}", percent(p.avg - sys), percent(sys)), percent(p.avg)),
+    let chart = area_chart(l, "cpu-chart", &[Layer { top: total, bottom: Some(sys), color: apps_color }, Layer { top: sys, bottom: None, color: system_color }], s.point, ["100%", "50%"]);
+    let readout = match s.point.and_then(|at| Some((at, total[at]?))) {
+        Some((at, p)) => {
+            let system = sys[at].map_or(0.0, |p| p.avg);
+            look::readout(l, None, point_time(view, tier, at), format!("apps {} · system {}", percent(p.avg - system), percent(system)), percent(p.avg))
+        }
         None => match peak(total) {
-            Some(at) => readout(l, format!("Peak · {}", point_time(view, tier, at)), false, String::new(), percent(total[at].map_or(0.0, |p| p.max))),
-            None => readout(l, "No readings yet".to_owned(), false, String::new(), String::new()),
+            Some(at) => look::readout(l, Some(apps_color), format!("Peak at {}", point_time(view, tier, at)), String::new(), percent(total[at].map_or(0.0, |p| p.max))),
+            None => look::readout(l, None, "No readings yet".to_owned(), String::new(), String::new()),
         },
     };
+    let history = section("cpu-history").gap(8.0).child(history_title(s, l)).child(chart).child(axis(view, tier, l)).child(readout);
 
     let apps = app_list(s, l, "cpu-apps", "share of all cores", |app| app.cpu as f64, |share| cpu_share(share as f32));
-    body.child(hero)
-        .child(history_bar(s, l))
-        .child(col().w_full().gap(5.0).child(chart).child(axis(view, tier)(l)).child(el().h(3.0)).child(readout))
+    col()
+        .w_full()
+        .child(now)
+        .child(hairline(l))
+        .child(history)
+        .child(hairline(l))
         .child(apps)
-        .child(core_bars(l, &cpu.cores, machine.efficiency_cores))
+        .child(hairline(l))
+        .child(core_bars(l, &cpu.cores, view.machine.efficiency_cores))
 }
 
 pub fn memory(s: &Ui, l: &Look) -> El {
-    let body = col().key("memory").w_full().px(PAD_X).pb(14.0).gap(14.0);
     let Some((view, memory)) = s.system.as_ref().and_then(|view| Some((view, view.memory.as_ref()?))) else {
-        return body.child(text("Reading this Mac…").key("memory-loading").font(font(12.5, 400.0)).color(l.dim));
+        return reading(l, "memory-loading");
     };
     let [app, wired, compressed] = l.series;
-    let cached = l.dim.alpha(0.5);
+    let cached = l.faint;
 
     let used = ui::system_bytes(memory.used());
     let (number, unit) = used.split_once(' ').unwrap_or((&used, ""));
     let (status, status_label) = match memory.pressure {
         Pressure::Normal => (l.good, "Pressure normal"),
-        Pressure::Warning => (l.warning, "Pressure high"),
-        Pressure::Critical => (l.critical, "Pressure critical"),
+        Pressure::Warning => (l.warning_text, "Pressure high"),
+        Pressure::Critical => (l.critical_text, "Pressure critical"),
     };
-    let pressure = row()
-        .key("pressure")
-        .h(22.0)
-        .px(8.0)
-        .gap(6.0)
-        .radius(11.0)
-        .center_y()
-        .fill(status.alpha(0.16))
-        .help("How hard macOS is working to find memory for apps")
-        .child(el().size(7.0, 7.0).radius(3.5).fill(status))
-        .child(text(status_label).font(font(11.0, 600.0)).color(l.text));
     let hero = row()
-        .key("memory-hero")
         .w_full()
         .items_end()
-        .child(big_number(l, number, unit, &format!("used of {}", ui::system_bytes(memory.total))))
+        .child(big_number(l, number, &format!("{unit} used of {}", ui::system_bytes(memory.total))))
         .child(spacer())
-        .child(col().pb(3.0).child(pressure));
+        .child(col().pb(8.0).child(look::pill("pressure", status, status_label.to_owned()).help("How hard macOS is working to find memory for apps")));
 
-    // The parts as one bar, each its share of all memory, and what is left free as the track.
+    // The parts as one bar, each its share of all memory, and what is left free after them.
+    let free = memory.total.saturating_sub(memory.used() + memory.cached);
+    let parts = [(app, "App", memory.app), (wired, "Wired", memory.wired), (compressed, "Compressed", memory.compressed), (cached, "Cached", memory.cached), (l.track, "Free", free)];
     let total = memory.total.max(1) as f32;
-    let parts = [(app, "App", memory.app), (wired, "Wired", memory.wired), (compressed, "Compressed", memory.compressed), (cached, "Cached", memory.cached)];
-    let mut bar = row().key("memory-bar").w_full().h(10.0).gap(2.0);
-    let mut left = INNER_W;
-    for (at, (color, name, bytes)) in parts.iter().enumerate() {
-        let w = (bytes.to_owned() as f32 / total * INNER_W).floor();
-        if w < 2.0 {
-            continue;
-        }
-        left -= w + 2.0;
-        bar = bar.child(el().key(format!("memory-part-{at}")).w(w - 2.0).h(10.0).radius(3.0).fill(*color).help(format!("{name}: {}", ui::system_bytes(*bytes))));
+    let shown: Vec<_> = parts.iter().filter(|part| part.2 as f32 / total * INNER_W >= 3.0).collect();
+    let room = INNER_W - 2.0 * shown.len().saturating_sub(1) as f32;
+    let mut bar = row().key("memory-bar").w_full().h(8.0).gap(2.0);
+    for (at, (color, name, bytes)) in shown.iter().enumerate() {
+        let w = (*bytes as f32 / total * room).floor();
+        let piece = if at + 1 == shown.len() { el().grow(1.0).min_w(0.0) } else { el().w(w) };
+        bar = bar.child(piece.key(format!("memory-part-{at}")).h(8.0).radius(2.0).fill(*color).help(format!("{name}: {}", ui::system_bytes(*bytes))));
     }
-    if left > 2.0 {
-        bar = bar.child(el().key("memory-free").grow(1.0).min_w(0.0).h(10.0).radius(3.0).fill(l.track).help("Free"));
-    }
-    let mut strip = row().key("memory-strip").w_full();
+    let mut legend = row().key("memory-strip").w_full().justify_between();
     for (color, name, bytes) in parts {
-        strip = strip.child(cell(l, Some(color), name, ui::system_bytes(bytes)));
+        legend = legend.child(
+            col()
+                .gap(2.0)
+                .child(row().gap(4.0).center_y().child(look::key_swatch(color, 7.0)).child(text(name).font(font(10.0, 400.0)).color(l.dim)))
+                .child(text(ui::system_bytes(bytes)).font(digits(12.0, 600.0)).color(l.text)),
+        );
     }
+    let now = now_block("memory-hero")
+        .child(hero)
+        .child(bar)
+        .child(legend)
+        .child(text("Used is App + Wired + Compressed, as Activity Monitor counts it. Pressure is how hard macOS works to free memory.").font(font(10.5, 400.0).lh(14.0)).color(l.faint).w_full().wrap());
 
     let tier = s.tier;
     let used_share = &view.memory_used[tier];
-    let chart = area_chart(l, "memory-chart", &[Layer { top: used_share, bottom: None, color: app }], s.point);
+    let chart = area_chart(l, "memory-chart", &[Layer { top: used_share, bottom: None, color: app }], s.point, ["100%", "50%"]);
     let bytes = |share: f32| ui::system_bytes((share as f64 * memory.total as f64) as u64);
     let readout = match s.point.and_then(|at| Some((at, used_share[at]?))) {
-        Some((at, p)) => readout(l, point_time(view, tier, at), true, percent(p.avg), bytes(p.avg)),
+        Some((at, p)) => look::readout(l, None, point_time(view, tier, at), percent(p.avg), bytes(p.avg)),
         None => match peak(used_share) {
             Some(at) => {
                 let p = used_share[at].map_or(0.0, |p| p.max);
-                readout(l, format!("Peak · {}", point_time(view, tier, at)), false, percent(p), bytes(p))
+                look::readout(l, Some(app), format!("Peak at {}", point_time(view, tier, at)), percent(p), bytes(p))
             }
-            None => readout(l, "No readings yet".to_owned(), false, String::new(), String::new()),
+            None => look::readout(l, None, "No readings yet".to_owned(), String::new(), String::new()),
         },
     };
+    let history = section("memory-history").gap(8.0).child(history_title(s, l)).child(chart).child(axis(view, tier, l)).child(readout);
 
     let swap = row()
         .key("swap")
         .w_full()
-        .h(32.0)
+        .py(9.0)
         .px(10.0)
+        .gap(12.0)
         .radius(8.0)
+        .continuous_corners()
         .fill(l.card)
         .center_y()
-        .help("Memory macOS moved to disk to make room")
-        .child(text("Swap").font(font(12.0, 500.0)).color(l.text))
-        .child(spacer())
-        .child(text(if memory.swap_used == 0 { "Not used".to_owned() } else { format!("{} used", ui::system_bytes(memory.swap_used)) }).font(digits(12.0, 500.0)).color(l.dim));
+        .child(col().grow(1.0).min_w(0.0).gap(1.0).child(text("Swap").font(font(12.5, 600.0)).color(l.text)).child(text("Memory moved to disk to make room").font(font(10.5, 400.0)).color(l.faint)))
+        .child(text(if memory.swap_used == 0 { "Not used".to_owned() } else { format!("{} used", ui::system_bytes(memory.swap_used)) }).font(digits(12.0, 600.0)).color(l.text));
 
-    let apps = app_list(s, l, "memory-apps", "by footprint", |app| app.memory as f64, |bytes| ui::system_bytes(bytes as u64));
-    body.child(hero)
-        .child(col().w_full().gap(10.0).child(bar).child(strip))
+    let apps = app_list(s, l, "memory-apps", "memory each app holds", |app| app.memory as f64, |bytes| ui::system_bytes(bytes as u64));
+    col()
+        .w_full()
+        .child(now)
+        .child(hairline(l))
         .child(apps)
-        .child(history_bar(s, l))
-        .child(col().w_full().gap(5.0).child(chart).child(axis(view, tier)(l)).child(el().h(3.0)).child(readout))
-        .child(swap)
+        .child(hairline(l))
+        .child(history.pb(12.0))
+        .child(col().w_full().px(PAD_X).pb(14.0).child(swap))
 }
 
 /// An app's share of the CPU: a decimal under 10%, where the small ones differ.
@@ -168,44 +242,34 @@ fn cpu_share(share: f32) -> String {
 }
 
 /// The apps using the most, one row each: icon, name, how many processes it runs and its
-/// figure, over a slim meter of its share of the busiest app's. Under them, what the rest add
-/// up to.
-fn app_list(s: &Ui, l: &Look, key: &'static str, caption: &str, measure: fn(&AppUsage) -> f64, value: fn(f64) -> String) -> El {
-    let mut list = col().key(key).w_full().gap(2.0);
-    let heading = row().w_full().center_y().pb(6.0).child(text("Apps").font(font(13.0, 600.0)).color(l.text)).child(spacer()).child(text(caption.to_owned()).font(font(11.0, 400.0)).color(l.dim));
-    list = list.child(heading);
+/// figure. Under them, what the rest add up to.
+pub(crate) fn app_list(s: &Ui, l: &Look, key: &'static str, note: &str, measure: fn(&AppUsage) -> f64, value: fn(f64) -> String) -> El {
+    let mut list = section(key).pb(10.0).gap(2.0).child(section_title(l, "Apps", Some(caption(l, note.to_owned()))).pb(6.0));
     let Some(all) = s.system.as_ref().and_then(|view| view.apps.clone()) else {
-        return list.child(text("Reading apps…").key(format!("{key}-loading")).font(font(12.0, 400.0)).color(l.dim).px(8.0));
+        return list.child(text("Reading apps…").key(format!("{key}-loading")).font(font(12.0, 400.0)).color(l.dim));
     };
     let (top, rest, others) = apps::top(&all, APP_ROWS, measure);
-    let most = top.first().map_or(0.0, |app| measure(app)).max(f64::MIN_POSITIVE);
-    // The meter runs under the name and the figure, from the icon's edge to the panel's.
-    let meter_w = INNER_W - ICON - 10.0;
     for (at, app) in top.iter().enumerate() {
-        let share = (measure(app) / most).clamp(0.0, 1.0) as f32;
-        let mut line = row().w_full().gap(6.0).center_y().child(text(app.name.clone()).font(font(12.0, 500.0)).color(l.text).truncate().min_w(0.0));
+        let mut name = row().grow(1.0).min_w(0.0).gap(6.0).center_y().child(text(app.name.clone()).font(font(12.5, 500.0)).color(l.text).truncate().min_w(0.0));
         if app.processes > 1 {
-            line = line.child(text(format!("{} processes", app.processes)).font(digits(10.5, 400.0)).color(l.faint));
-        }
-        line = line.child(spacer()).child(text(value(measure(app))).font(digits(12.0, 500.0)).color(l.text));
-        let mut meter = el().w(meter_w).h(3.0).radius(1.5).fill(l.track);
-        if share > 0.0 {
-            meter = meter.child(el().absolute(0.0, 0.0).size((meter_w * share).max(3.0), 3.0).radius(1.5).fill(l.series[0]));
+            name = name.child(text(format!("{} processes", app.processes)).font(digits(11.0, 400.0)).color(l.faint));
         }
         list = list.child(
             row()
                 .key(format!("{key}-{at}"))
                 .w_full()
-                .h(34.0)
+                .py(5.0)
                 .gap(10.0)
                 .center_y()
                 .help(app.path.as_ref().map_or_else(|| app.name.clone(), |p| p.to_string_lossy().into_owned()))
                 .child(app_icon(s, l, app))
-                .child(col().grow(1.0).min_w(0.0).gap(5.0).child(line).child(meter)),
+                .child(name)
+                .child(text(value(measure(app))).font(digits(12.5, 600.0)).color(l.text)),
         );
     }
     if others > 0 {
-        list = list.child(text(format!("{others} more, {} together", value(rest))).key(format!("{key}-rest")).font(digits(11.0, 400.0)).color(l.faint).pl(ICON + 10.0).pt(4.0));
+        let noun = if others == 1 { "app" } else { "apps" };
+        list = list.child(caption(l, format!("{others} more {noun}, {} together", value(rest))).key(format!("{key}-rest")).pt(4.0));
     }
     list
 }
@@ -219,101 +283,47 @@ fn app_icon(s: &Ui, l: &Look, app: &AppUsage) -> El {
     }
 }
 
-fn percent(share: f32) -> String {
+pub(crate) fn percent(share: f32) -> String {
     format!("{:.0}%", (share * 100.0).clamp(0.0, 100.0))
 }
 
-/// The headline: a large number, its unit a step quieter, and a caption under them.
-fn big_number(l: &Look, number: &str, unit: &str, caption: &str) -> El {
-    col()
-        .gap(1.0)
-        .child(
-            row()
-                .items_end()
-                .gap(2.0)
-                .child(text(number.to_owned()).font(digits(30.0, 700.0).tracking(-0.6)).color(l.text))
-                .child(text(unit.to_owned()).font(font(15.0, 600.0)).color(l.dim).pb(4.0)),
-        )
-        .child(text(caption.to_owned()).font(font(11.0, 400.0)).color(l.dim))
-}
-
-/// A series' swatch, its name and its value: the legend, so colour never names a series alone.
-fn legend_row(l: &Look, color: Color, name: &str, value: String) -> El {
-    row()
-        .gap(6.0)
-        .center_y()
-        .child(el().size(8.0, 8.0).radius(2.0).fill(color))
-        .child(text(name.to_owned()).font(font(11.5, 400.0)).color(l.dim))
-        .child(row().w(36.0).justify_end().child(text(value).font(digits(11.5, 600.0)).color(l.text)))
-}
-
-/// One figure in a row of four: its name small above, its value below.
-fn cell(l: &Look, swatch: Option<Color>, name: &str, value: String) -> El {
-    let mut label = row().gap(5.0).center_y();
-    if let Some(color) = swatch {
-        label = label.child(el().size(7.0, 7.0).radius(2.0).fill(color));
-    }
-    label = label.child(text(name.to_owned()).font(font(10.5, 400.0)).color(l.faint));
-    col().grow(1.0).min_w(0.0).gap(2.0).child(label).child(text(value).font(digits(12.0, 500.0)).color(l.text))
-}
-
-fn history_bar(s: &Ui, l: &Look) -> El {
+pub(crate) fn history_title(s: &Ui, l: &Look) -> El {
     let mut tiers = segments(l, "tiers");
     for (at, tier) in TIERS.iter().enumerate() {
         tiers = tiers.child(segment(l, format!("tier-{}", tier.label), tier.label, s.tier == at, move |s: &mut Ui| ui::set_tier(s, at)));
     }
-    row().key("history").w_full().center_y().child(text("History").font(font(13.0, 600.0)).color(l.text)).child(spacer()).child(tiers)
+    section_title(l, "History", Some(tiers)).key("history")
 }
 
-fn point_time(view: &SystemView, tier: usize, at: usize) -> String {
+pub(crate) fn point_time(view: &SystemView, tier: usize, at: usize) -> String {
     time::clock(history::bucket_start(tier, view.at, at), tier == 0)
 }
 
 /// The point with the highest reading.
-fn peak(points: &[Option<Point>]) -> Option<usize> {
+pub(crate) fn peak(points: &[Option<Point>]) -> Option<usize> {
     points.iter().enumerate().filter_map(|(at, p)| Some((at, (*p)?.max))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(at, _)| at)
 }
 
 /// The times under the chart: where it starts, its middle, and now.
-fn axis(view: &SystemView, tier: usize) -> impl Fn(&Look) -> El {
+pub(crate) fn axis(view: &SystemView, tier: usize, l: &Look) -> El {
     let len = TIERS[tier].len;
-    let labels = [point_time(view, tier, 0), point_time(view, tier, len / 2), "now".to_owned()];
-    move |l: &Look| {
-        let mut axis = row().key("chart-axis").w_full().justify_between();
-        for label in &labels {
-            axis = axis.child(text(label.clone()).font(digits(10.0, 400.0)).color(l.faint));
-        }
-        axis
+    let mut axis = row().key("chart-axis").w_full().justify_between();
+    for label in [point_time(view, tier, 0), point_time(view, tier, len / 2), "now".to_owned()] {
+        axis = axis.child(text(label).font(digits(10.0, 400.0)).color(l.faint));
     }
-}
-
-/// The line under a chart reading one point: its time, then its values. It keeps its shape as
-/// the pointer moves, so only the words change.
-fn readout(l: &Look, name: String, live: bool, side: String, value: String) -> El {
-    row()
-        .key("chart-readout")
-        .w_full()
-        .h(26.0)
-        .px(8.0)
-        .radius(6.0)
-        .fill(l.card)
-        .center_y()
-        .child(text(name).font(digits(11.5, 500.0)).color(if live { l.text } else { l.dim }))
-        .child(spacer())
-        .child(text(side).font(digits(11.5, 400.0)).color(l.dim))
-        .child(row().w(64.0).justify_end().child(text(value).font(digits(11.5, 600.0)).color(l.text)))
+    axis
 }
 
 /// One filled band of an area chart: from `bottom` (or the baseline) up to `top`, with a line
 /// along `top`.
-struct Layer<'a> {
-    top: &'a [Option<Point>],
-    bottom: Option<&'a [Option<Point>]>,
-    color: Color,
+pub(crate) struct Layer<'a> {
+    pub top: &'a [Option<Point>],
+    pub bottom: Option<&'a [Option<Point>]>,
+    pub color: Color,
 }
 
 /// The stretches of `points` with a reading in them, as index ranges.
-fn runs(points: &[Option<Point>]) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn runs(points: &[Option<Point>]) -> Vec<std::ops::Range<usize>> {
     let mut runs = Vec::new();
     let mut start = None;
     for (at, point) in points.iter().enumerate() {
@@ -332,7 +342,7 @@ fn runs(points: &[Option<Point>]) -> Vec<std::ops::Range<usize>> {
     runs
 }
 
-fn area_chart(l: &Look, key: &str, layers: &[Layer], point: Option<usize>) -> El {
+pub(crate) fn area_chart(l: &Look, key: &str, layers: &[Layer], point: Option<usize>, labels: [&str; 2]) -> El {
     let len = layers.first().map_or(0, |layer| layer.top.len());
     let (w, h) = (INNER_W, CHART_H);
     let x = |at: usize| if len > 1 { at as f32 / (len - 1) as f32 * w } else { 0.0 };
@@ -342,7 +352,7 @@ fn area_chart(l: &Look, key: &str, layers: &[Layer], point: Option<usize>) -> El
     let mut shape = Shape::new()
         .line([0.0, y(1.0)], [w, y(1.0)], 1.0, rune::LineCap::Butt, l.stroke)
         .line([0.0, y(0.5)], [w, y(0.5)], 1.0, rune::LineCap::Butt, l.stroke)
-        .line([0.0, y(0.0)], [w, y(0.0)], 1.0, rune::LineCap::Butt, l.track);
+        .line([0.0, h - 0.5], [w, h - 0.5], 1.0, rune::LineCap::Butt, l.track);
     for layer in layers {
         let value = |points: &[Option<Point>], at: usize| points[at].map_or(0.0, |p| p.avg);
         for run in runs(layer.top) {
@@ -350,38 +360,48 @@ fn area_chart(l: &Look, key: &str, layers: &[Layer], point: Option<usize>) -> El
             let xs: Vec<(usize, f32)> = if run.len() == 1 { vec![(run.start, x(run.start) - 0.75), (run.start, x(run.start) + 0.75)] } else { run.clone().map(|at| (at, x(at))).collect() };
             let top: Vec<[f32; 2]> = xs.iter().map(|&(at, px)| [px, y(value(layer.top, at))]).collect();
             let bottom: Vec<[f32; 2]> = xs.iter().rev().map(|&(at, px)| [px, y(layer.bottom.map_or(0.0, |b| value(b, at)))]).collect();
-            shape = shape.fill([top.clone(), bottom].concat(), layer.color.alpha(0.2));
+            shape = shape.fill([top.clone(), bottom].concat(), layer.color.alpha(0.22));
             shape = shape.stroke(top, LINE, layer.color);
         }
     }
-    if let Some(at) = point.filter(|&at| at < len) {
+    // A ring on the point read: the one under the pointer, else the peak.
+    let marked = point.filter(|&at| at < len).or_else(|| layers.first().and_then(|layer| peak(layer.top)));
+    if let Some(at) = marked {
         let px = x(at);
-        shape = shape.line([px, 0.0], [px, h], 1.0, rune::LineCap::Butt, l.faint);
-        for layer in layers {
-            if let Some(p) = layer.top[at] {
-                // A dot on the line, ringed in the panel's colour so it lifts off the fill.
-                let py = y(p.avg);
-                shape = shape.line([px, py], [px + 0.01, py], 9.0, rune::LineCap::Round, l.panel.alpha(1.0)).line([px, py], [px + 0.01, py], 6.0, rune::LineCap::Round, layer.color);
-            }
+        if point.is_some() {
+            shape = shape.line([px, 0.0], [px, h], 1.0, rune::LineCap::Butt, l.dim);
+        }
+        if let Some(layer) = layers.first()
+            && let Some(p) = layer.top[at]
+        {
+            let py = y(p.avg);
+            shape = shape.line([px, py], [px + 0.01, py], 9.0, rune::LineCap::Round, layer.color).line([px, py], [px + 0.01, py], 5.0, rune::LineCap::Round, l.solid());
         }
     }
-    canvas(shape)
-        .key(key.to_owned())
+    let label = |words: &str, top: f32| row().absolute(w - 80.0, top).w(80.0).justify_end().px(2.0).child(text(words.to_owned()).font(digits(9.0, 400.0)).color(l.faint));
+    el().key(format!("{key}-area"))
         .size(w, h)
-        .label("History chart")
-        .on_pointer_move_local(move |s: &mut Ui, p, _| ui::hover_point(s, p.x / w, len))
-        .on_hover_change(|s: &mut Ui, inside, _| {
-            if !inside {
-                ui::leave_point(s);
-            }
-        })
+        .child(
+            canvas(shape)
+                .key(key.to_owned())
+                .size(w, h)
+                .label("History chart")
+                .on_pointer_move_local(move |s: &mut Ui, p, _| ui::hover_point(s, p.x / w, len))
+                .on_hover_change(|s: &mut Ui, inside, _| {
+                    if !inside {
+                        ui::leave_point(s);
+                    }
+                }),
+        )
+        .child(label(labels[0], y(1.0) + 3.0))
+        .child(label(labels[1], y(0.5) - 14.0))
 }
 
 /// Each core's share in use as a bar, efficiency cores in their own group before the rest.
 fn core_bars(l: &Look, cores: &[f32], efficiency: usize) -> El {
     let fill = l.series[0];
-    let group = |key: &'static str, label: &str, first: usize, shares: &[f32]| {
-        let mut bars = row().w_full().h(CORE_H).gap(3.0);
+    let group = |key: &'static str, label: String, first: usize, shares: &[f32]| {
+        let mut bars = row().w_full().h(CORE_H).gap(4.0);
         for (at, &share) in shares.iter().enumerate() {
             let height = (share.clamp(0.0, 1.0) * CORE_H).max(2.0);
             bars = bars.child(
@@ -390,26 +410,21 @@ fn core_bars(l: &Look, cores: &[f32], efficiency: usize) -> El {
                     .grow(1.0)
                     .min_w(0.0)
                     .h(CORE_H)
-                    .radius(3.0)
+                    .clip_rounded(3.0)
                     .fill(l.track)
                     .justify_end()
                     .help(format!("Core {}: {}", first + at + 1, percent(share)))
-                    .child(el().w_full().h(height).radius(3.0).fill(fill)),
+                    .child(el().w_full().h(height).fill(fill)),
             );
         }
-        col().key(key).grow(shares.len().max(1) as f32).min_w(0.0).gap(5.0).child(bars).child(text(label.to_owned()).font(font(10.0, 400.0)).color(l.faint))
+        col().key(key).grow(shares.len().max(1) as f32).min_w(0.0).gap(5.0).child(bars).child(text(label).font(font(10.5, 400.0)).color(l.faint))
     };
     let efficiency = efficiency.min(cores.len());
     let performance = cores.len() - efficiency;
-    let summary = if efficiency > 0 { format!("{performance} performance · {efficiency} efficiency") } else { format!("{} cores", cores.len()) };
-    let mut groups = row().key("cores").w_full().gap(10.0);
+    let mut groups = row().key("cores").w_full().gap(12.0);
     if efficiency > 0 {
-        groups = groups.child(group("cores-efficiency", "Efficiency", 0, &cores[..efficiency]));
+        groups = groups.child(group("cores-efficiency", format!("{efficiency} efficiency"), 0, &cores[..efficiency]));
     }
-    groups = groups.child(group("cores-performance", if efficiency > 0 { "Performance" } else { "" }, efficiency, &cores[efficiency..]));
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(row().w_full().center_y().child(text("Cores").font(font(13.0, 600.0)).color(l.text)).child(spacer()).child(text(summary).font(font(11.0, 400.0)).color(l.dim)))
-        .child(groups)
+    groups = groups.child(group("cores-performance", if efficiency > 0 { format!("{performance} performance") } else { format!("{performance} cores") }, efficiency, &cores[efficiency..]));
+    section("cores-section").gap(8.0).child(section_title(l, "Cores", Some(caption(l, "each bar: how busy that core is")))).child(groups)
 }

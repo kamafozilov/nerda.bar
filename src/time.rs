@@ -129,6 +129,24 @@ pub fn weekday_clock(unix: i64) -> String {
     format!("{} {}", WEEKDAYS[local(unix).weekday as usize], clock(unix, false))
 }
 
+/// A full date: "9 Mar 2027".
+pub fn date(unix: i64) -> String {
+    let time: libc::time_t = unix;
+    // SAFETY: as `local`.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&time, &mut tm);
+        tm
+    };
+    format!("{} {} {}", tm.tm_mday, MONTHS[tm.tm_mon.clamp(0, 11) as usize], tm.tm_year + 1900)
+}
+
+/// A date in the year: "Dec 1".
+pub fn month_day(unix: i64) -> String {
+    let date = local(unix);
+    format!("{} {}", MONTHS[date.month as usize - 1], date.day_of_month)
+}
+
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

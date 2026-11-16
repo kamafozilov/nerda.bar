@@ -19,19 +19,105 @@ pub fn fill(ui: &mut Ui) {
         window,
         scoped,
     };
-    ui.snapshot = Some(Snapshot {
+    ui.claude.snapshot = Some(Snapshot {
         plan: "Ultra".to_owned(),
         limits: vec![
-            limit("session", "Session", 76.0, 6540, 5 * 3600, false),
             limit("weekly", "Weekly", 41.0, 2 * 86_400 + 4 * 3600, 7 * 86_400, false),
             limit("weekly-fable", "Fable weekly", 58.0, 2 * 86_400 + 4 * 3600, 7 * 86_400, true),
         ],
-        extra: Some(ExtraUsage { used: 12.4, limit: Some(50.0), currency: "USD".to_owned() }),
+        extra: Some(ExtraUsage { used: 12.4, limit: Some(50.0), currency: "USD".to_owned(), resets_at: None }),
         fetched_at: now - 140,
+        resets: None,
     });
-    ui.stats = Some(Arc::new(StatsView { ranges: [range(now, 1), range(now, 7), range(now, 30)], activity: activity(now) }));
+    ui.claude.stats = Some(Arc::new(StatsView { ranges: [range(now, 1), range(now, 7), range(now, 30)], activity: activity(now) }));
     refill_history(ui);
+    codex(ui);
+    deepseek(ui);
     ui.system = Some(Arc::new(crate::system::demo(now as f64)));
+}
+
+/// Codex on ChatGPT Pro, a third of the way into its week, with a reset to spend.
+fn codex(ui: &mut Ui) {
+    let now = ui.now;
+    let limit = |id: &str, label: &str, used: f64, resets_in: i64, window: i64| Limit { id: id.to_owned(), label: label.to_owned(), used, resets_at: Some(now + resets_in), window, scoped: false };
+    let snapshot = Snapshot {
+        plan: "ChatGPT Pro".to_owned(),
+        limits: vec![limit("session", "5-hour", 29.0, 3 * 3600 + 12 * 60, 5 * 3600), limit("weekly", "Weekly", 36.0, 4 * 86_400 + 2 * 3600, 7 * 86_400)],
+        extra: None,
+        fetched_at: now - 140,
+        resets: Some(crate::model::Resets {
+            available: 1,
+            credits: vec![crate::model::ResetCredit {
+                id: "demo-1".to_owned(),
+                title: "Weekly reset".to_owned(),
+                description: Some("Starts the 5-hour and weekly limits over".to_owned()),
+                expires_at: Some(now + 18 * 86_400),
+            }],
+        }),
+    };
+    let mut month = range(now, 30);
+    let mut week = range(now, 7);
+    let mut today = range(now, 1);
+    for view in [&mut month, &mut week, &mut today] {
+        view.tokens = view.tokens.map(|count| count / 3);
+        let total = view.total();
+        let cost = view.cost * 0.33;
+        view.cost = cost;
+        view.models = vec![
+            ModelRow { name: "gpt-5.1-codex".to_owned(), tokens: total * 70 / 100, cost: Some(cost * 0.76) },
+            ModelRow { name: "gpt-5.1".to_owned(), tokens: total * 23 / 100, cost: Some(cost * 0.2) },
+            ModelRow { name: "gpt-5.1-codex-mini".to_owned(), tokens: total * 7 / 100, cost: Some(cost * 0.04) },
+        ];
+        for bar in &mut view.bars {
+            bar.parts = [bar.tokens * 70 / 100, bar.tokens * 23 / 100, bar.tokens - bar.tokens * 93 / 100, 0];
+            bar.tokens /= 3;
+            bar.parts = bar.parts.map(|part| part / 3);
+        }
+    }
+    let activity = activity(now);
+    ui.codex.history = Arc::new(history(&snapshot, &activity));
+    ui.codex.snapshot = Some(snapshot);
+    ui.codex.stats = Some(Arc::new(StatsView { ranges: [today, week, month], activity }));
+}
+
+/// A DeepSeek account with a few dollars, spending a little each day, topped up on Tuesday.
+fn deepseek(ui: &mut Ui) {
+    let now = ui.now;
+    let mut ledger = crate::deepseek::Ledger::default();
+    let spends = [0.38, 0.21, 0.62, 0.55, 0.71, 0.44, 0.33];
+    let mut total = 2.67 + spends.iter().sum::<f64>();
+    let today = time::local(now).day;
+    for (at, spend) in spends.iter().enumerate() {
+        let start = time::local_hour_start(today - 6 + at as i32, 0);
+        ledger.readings.push((start + 3600, total));
+        if time::local(start).weekday == 2 {
+            total += 5.0;
+            ledger.readings.push((start + 7200, total));
+        }
+        total -= spend;
+        ledger.readings.push(((start + 20 * 3600).min(now - 60), total));
+    }
+    ledger.last = Some(crate::deepseek::Balance { currency: "USD".to_owned(), total: 4.2, granted: 0.2, topped_up: 4.0, available: true, fetched_at: now - 140 });
+    ui.deepseek.ledger = Some(Arc::new(ledger));
+}
+
+/// The plan as a Pro or Max plan has it: a session limit first, then the weekly ones, each
+/// this much used.
+pub fn plan(ui: &mut Ui, name: &str, session: f64, weekly: f64, fable: f64) {
+    let now = ui.now;
+    if let Some(snapshot) = &mut ui.claude.snapshot {
+        snapshot.plan = name.to_owned();
+        snapshot.limits.retain(|limit| limit.id != "session");
+        snapshot.limits.insert(0, Limit { id: "session".to_owned(), label: "Session".to_owned(), used: session, resets_at: Some(now + 6540), window: 5 * 3600, scoped: false });
+        for limit in &mut snapshot.limits {
+            match limit.id.as_str() {
+                "weekly" => limit.used = weekly,
+                "weekly-fable" => limit.used = fable,
+                _ => {}
+            }
+        }
+    }
+    refill_history(ui);
 }
 
 /// Eight days of work by the hour: busy from nine to eleven at night and the last few hours,
@@ -53,8 +139,8 @@ fn activity(now: i64) -> Vec<Activity> {
 
 /// The readings again, for limits a scene has changed.
 pub fn refill_history(ui: &mut Ui) {
-    if let (Some(snapshot), Some(stats)) = (&ui.snapshot, &ui.stats) {
-        ui.history = Arc::new(history(snapshot, &stats.activity));
+    if let (Some(snapshot), Some(stats)) = (&ui.claude.snapshot, &ui.claude.stats) {
+        ui.claude.history = Arc::new(history(snapshot, &stats.activity));
     }
 }
 
@@ -96,7 +182,8 @@ fn range(now: i64, days: i32) -> RangeView {
                 let date = time::local_day(first + at);
                 format!("{} {} {}", WEEKDAYS[date.weekday as usize], date.day_of_month, MONTHS[date.month as usize - 1])
             };
-            Bar { label, tokens, cost: tokens as f64 * 0.78 / 1e6 }
+            let parts = [tokens * 58 / 100, tokens * 29 / 100, tokens * 9 / 100, tokens - tokens * 96 / 100];
+            Bar { label, tokens, cost: tokens as f64 * 0.78 / 1e6, parts }
         })
         .collect();
     let total: u64 = bars.iter().map(|bar| bar.tokens).sum();

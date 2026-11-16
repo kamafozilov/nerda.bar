@@ -50,10 +50,12 @@ pub struct Prices {
     pub models: HashMap<String, Rate>,
 }
 
-/// The part of models.dev's catalog that is read.
+/// The part of models.dev's catalog that is read: Claude's models, and OpenAI's for Codex.
 #[derive(Deserialize)]
 struct Catalog {
     anthropic: CatalogProvider,
+    #[serde(default)]
+    openai: Option<CatalogProvider>,
 }
 
 #[derive(Deserialize)]
@@ -124,7 +126,8 @@ impl Prices {
     fn from_catalog(body: &[u8], now: i64) -> Result<Prices, String> {
         let catalog: Catalog = serde_json::from_slice(body).map_err(|e| e.to_string())?;
         let mut models = HashMap::new();
-        for (id, model) in catalog.anthropic.models {
+        let openai = catalog.openai.map(|provider| provider.models).unwrap_or_default();
+        for (id, model) in catalog.anthropic.models.into_iter().chain(openai) {
             let Some(cost) = model.cost else { continue };
             let (Some(input), Some(output)) = (cost.input, cost.output) else { continue };
             let mut tiers: Vec<Tier> = cost
@@ -190,10 +193,10 @@ mod tests {
     }"#;
 
     #[test]
-    fn the_catalog_keeps_claude_models_with_a_price() {
+    fn the_catalog_keeps_claude_and_openai_models_with_a_price() {
         let prices = Prices::from_catalog(CATALOG.as_bytes(), 7).unwrap();
         assert_eq!(prices.fetched_at, 7);
-        assert_eq!(prices.models.len(), 3);
+        assert_eq!(prices.models.len(), 4);
         assert_eq!(prices.models["claude-haiku-5-5"].tiers[0].size, 100_000);
         assert!(Prices::from_catalog(br#"{"anthropic": {"models": {}}}"#, 7).is_err());
     }
@@ -205,7 +208,8 @@ mod tests {
         assert!(prices.rate("claude-opus-4-5-20251101").is_some());
         assert!(prices.rate("claude-opus-4-5-20990101").is_some());
         assert!(prices.rate("claude-opus-4-5[1m]").is_some());
-        assert!(prices.rate("gpt").is_none());
+        assert!(prices.rate("gpt").is_some(), "Codex's models are priced too");
+        assert!(prices.rate("o-nothing").is_none());
     }
 
     #[test]

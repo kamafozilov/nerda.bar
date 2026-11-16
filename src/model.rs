@@ -5,6 +5,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::time;
 
+/// A service whose plan or account the panel reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Provider {
+    Claude,
+    Codex,
+    DeepSeek,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::DeepSeek];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::DeepSeek => "DeepSeek",
+        }
+    }
+
+    /// Its menu bar item's id, and the stem of the files its readings are kept in.
+    pub fn id(self) -> &'static str {
+        match self {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::DeepSeek => "deepseek",
+        }
+    }
+}
+
 /// The remaining share at or under which a limit turns orange, then red.
 pub const WARNING_LEFT: f64 = 30.0;
 pub const CRITICAL_LEFT: f64 = 10.0;
@@ -91,6 +120,9 @@ pub struct ExtraUsage {
     /// `None` when no monthly cap is set.
     pub limit: Option<f64>,
     pub currency: String,
+    /// When the month's spend starts again, when the provider says.
+    #[serde(default)]
+    pub resets_at: Option<i64>,
 }
 
 /// A provider's limits as of one successful refresh.
@@ -102,6 +134,26 @@ pub struct Snapshot {
     pub extra: Option<ExtraUsage>,
     /// Unix seconds of the refresh.
     pub fetched_at: i64,
+    /// Limit resets the plan has been given, where the provider reports them.
+    #[serde(default)]
+    pub resets: Option<Resets>,
+}
+
+/// Resets of a plan's limits, each spent once to start the limits it covers over.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Resets {
+    pub available: u32,
+    pub credits: Vec<ResetCredit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResetCredit {
+    pub id: String,
+    /// "Full reset (Weekly + 5 hr)".
+    pub title: String,
+    pub description: Option<String>,
+    /// Unix seconds.
+    pub expires_at: Option<i64>,
 }
 
 impl Snapshot {
@@ -176,7 +228,7 @@ pub fn menu_bar_limit(snapshot: &Snapshot, metric: MenuBarMetric) -> Option<&Lim
     match metric {
         MenuBarMetric::Lowest => lowest(),
         MenuBarMetric::Weekly => snapshot.limit("weekly").or_else(lowest),
-        MenuBarMetric::Session => general().find(|l| l.used_up()).or_else(|| snapshot.limit("session")).or_else(lowest),
+        MenuBarMetric::Session => general().find(|l| l.used_up()).or_else(|| snapshot.limit("session")).or_else(|| snapshot.limit("weekly")).or_else(lowest),
     }
 }
 
@@ -209,9 +261,39 @@ pub fn names(limit: &Limit, any_scoped: bool) -> (String, Option<String>) {
     (limit.label.clone(), None)
 }
 
-/// The letter that names a limit in the menu bar: "S", "W", "F" for "Fable weekly".
-pub fn tag(limit: &Limit) -> char {
-    limit.label.chars().next().map_or('?', |c| c.to_ascii_uppercase())
+/// The word that names a limit in the menu bar: "Session", "Weekly", "Fable" for "Fable
+/// weekly".
+pub fn tag(limit: &Limit) -> String {
+    match limit.label.strip_suffix(" weekly") {
+        Some(model) if limit.scoped => model.to_owned(),
+        _ => limit.label.clone(),
+    }
+}
+
+/// The choices of what the menu bar shows that this plan has: a plan without a session limit
+/// has no session to show.
+pub fn menu_bar_choices(snapshot: Option<&Snapshot>) -> Vec<MenuBarMetric> {
+    let session = snapshot.is_none_or(|snapshot| snapshot.limit("session").is_some());
+    let mut choices = vec![MenuBarMetric::Weekly, MenuBarMetric::Lowest];
+    if session {
+        choices.insert(0, MenuBarMetric::Session);
+    }
+    choices
+}
+
+impl MenuBarMetric {
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuBarMetric::Session => "Session",
+            MenuBarMetric::Weekly => "Weekly",
+            MenuBarMetric::Lowest => "Lowest",
+        }
+    }
+
+    /// The choice that shows: the session where the plan has none reads as the weekly limit.
+    pub fn effective(self, snapshot: Option<&Snapshot>) -> MenuBarMetric {
+        if self == MenuBarMetric::Session && !menu_bar_choices(snapshot).contains(&self) { MenuBarMetric::Weekly } else { self }
+    }
 }
 
 /// A percentage as the menu bar and the panel print it: left or used, whole.
@@ -281,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_window_that_ended_reads_as_fresh() {
-        let snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 80.0, 60, 18_000), limit("weekly", 40.0, 9000, 604_800)], extra: None, fetched_at: NOW };
+        let snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 80.0, 60, 18_000), limit("weekly", 40.0, 9000, 604_800)], extra: None, fetched_at: NOW, resets: None };
         let later = snapshot.rolled(NOW + 120);
         assert_eq!(later.limits[0].used, 0.0);
         assert_eq!(later.limits[0].resets_at, None);
@@ -290,7 +372,7 @@ mod tests {
 
     #[test]
     fn the_menu_bar_shows_the_session_until_something_else_blocks() {
-        let mut snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 20.0, 60, 18_000), limit("weekly", 60.0, 9000, 604_800)], extra: None, fetched_at: NOW };
+        let mut snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 20.0, 60, 18_000), limit("weekly", 60.0, 9000, 604_800)], extra: None, fetched_at: NOW, resets: None };
         assert_eq!(menu_bar_limit(&snapshot, MenuBarMetric::Session).unwrap().id, "session");
         assert_eq!(menu_bar_limit(&snapshot, MenuBarMetric::Weekly).unwrap().id, "weekly");
         assert_eq!(menu_bar_limit(&snapshot, MenuBarMetric::Lowest).unwrap().id, "weekly");
@@ -305,9 +387,9 @@ mod tests {
         fable.scoped = true;
         let mut weekly = limit("weekly", 77.0, 60, 100);
         weekly.label = "Weekly".to_owned();
-        let snapshot = Snapshot { plan: String::new(), limits: vec![weekly, fable], extra: None, fetched_at: NOW };
+        let snapshot = Snapshot { plan: String::new(), limits: vec![weekly, fable], extra: None, fetched_at: NOW, resets: None };
         let shown = menu_bar_limits(&snapshot, MenuBarMetric::Session, true);
-        assert_eq!(shown.iter().map(|l| tag(l)).collect::<String>(), "WF");
+        assert_eq!(shown.iter().map(|l| tag(l)).collect::<Vec<_>>(), ["Weekly", "Fable"]);
         assert_eq!(menu_bar_limits(&snapshot, MenuBarMetric::Session, false).len(), 1);
     }
 
@@ -316,7 +398,7 @@ mod tests {
         let mut fable = limit("weekly-fable", 89.0, 60, 604_800);
         fable.label = "Fable weekly".to_owned();
         fable.scoped = true;
-        let snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 95.0, 60, 18_000), limit("weekly", 77.0, 60, 604_800), fable], extra: None, fetched_at: NOW };
+        let snapshot = Snapshot { plan: String::new(), limits: vec![limit("session", 95.0, 60, 18_000), limit("weekly", 77.0, 60, 604_800), fable], extra: None, fetched_at: NOW, resets: None };
         assert_eq!(chart_default(&snapshot).unwrap().id, "weekly-fable");
         assert_eq!(names(&snapshot.limits[2], true), ("Weekly".to_owned(), Some("Fable".to_owned())));
         assert_eq!(names(&snapshot.limits[1], true).1.as_deref(), Some("All models"));

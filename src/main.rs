@@ -12,14 +12,25 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Nerda Bar is a macOS app.");
 
+mod agents;
+mod agents_view;
 mod alloc;
 mod burn;
 mod burn_view;
+mod codex;
+mod codex_logs;
 mod claude;
 mod config;
+mod deepseek;
+mod deepseek_view;
 mod demo;
+mod icons;
+mod look;
+mod mac_view;
 mod model;
 mod prices;
+mod resets_view;
+mod settings_view;
 mod stats;
 mod status_item;
 mod system;
@@ -79,7 +90,7 @@ fn cycle(handle: rune::AppHandle<Ui>) {
                 handle.update(ui::close);
                 std::thread::sleep(std::time::Duration::from_millis(700));
             }
-            handle.update(move |s, tx| ui::toggle(s, anchor, Tab::Agents, tx));
+            handle.update(move |s, tx| ui::toggle(s, anchor, Tab::Claude, tx));
             std::thread::sleep(std::time::Duration::from_millis(1300));
         }
     });
@@ -95,7 +106,7 @@ fn main() {
     let data_dir = config::data_dir();
     let config = if headless { config::Config::default() } else { config::load(&data_dir) };
     // The limits of the last run show at once; the first refresh replaces them.
-    let cached = if headless { None } else { worker::Cache::load(&data_dir).snapshot };
+    let cached = if headless { (None, None) } else { (worker::Cache::load(&data_dir, model::Provider::Claude).snapshot, worker::Cache::load(&data_dir, model::Provider::Codex).snapshot) };
 
     let spec = AppSpec::<Ui> {
         // The system font, as AppKit draws it; Inter where it can't be found.
@@ -116,6 +127,10 @@ fn main() {
                 s.point = Some(140);
             }),
             ("memory", |s| s.tab = Tab::Memory),
+            ("disk", |s| s.tab = Tab::Disk),
+            ("network", |s| s.tab = Tab::Network),
+            ("battery", |s| s.tab = Tab::Battery),
+            ("gpu", |s| s.tab = Tab::Gpu),
             ("memory-warning", |s| {
                 s.tab = Tab::Memory;
                 if let Some(view) = &mut s.system
@@ -132,18 +147,40 @@ fn main() {
             ("today", |s| s.range = Range::Today),
             ("month", |s| s.range = Range::Month),
             ("trace", |s| s.trace = Some(0.3)),
-            ("session", |s| s.chart = Some("session".to_owned())),
-            ("low", |s| {
-                if let Some(snapshot) = &mut s.snapshot {
-                    snapshot.limits[0].used = 93.0;
-                    snapshot.limits[1].used = 74.0;
-                }
-                demo::refill_history(s);
+            ("session", |s| s.claude.chart = Some("session".to_owned())),
+            ("pro", |s| demo::plan(s, "Pro", 76.0, 41.0, 58.0)),
+            ("pro-session", |s| {
+                demo::plan(s, "Pro", 76.0, 41.0, 58.0);
+                s.claude.chart = Some("session".to_owned());
             }),
-            ("offline", |s| s.problem = Some(Problem::Offline("Couldn't reach Claude: the network is down.".to_owned()))),
+            ("critical", |s| demo::plan(s, "Pro", 94.0, 73.0, 92.0)),
+            ("low", |s| demo::plan(s, "Pro", 93.0, 74.0, 58.0)),
+            ("loading", |s| s.claude.snapshot = None),
+            ("offline", |s| {
+                demo::plan(s, "Pro", 76.0, 41.0, 58.0);
+                s.claude.problem = Some(Problem::Offline("Couldn't reach Claude.".to_owned()));
+            }),
+            ("critical-offline", |s| {
+                demo::plan(s, "Pro", 94.0, 73.0, 92.0);
+                s.claude.problem = Some(Problem::Offline("Couldn't reach Claude.".to_owned()));
+            }),
+            ("expired", |s| s.claude.problem = Some(Problem::LoginExpired)),
+            ("paused", |s| s.claude.problem = Some(Problem::RateLimited { until: s.now + 720 })),
+            ("failed", |s| s.claude.problem = Some(Problem::Failed("The server answered 503.".to_owned()))),
+            ("codex", |s| s.tab = Tab::Codex),
+            ("codex-confirm", |s| {
+                s.tab = Tab::Codex;
+                s.reset = agents::ResetFlow::Confirm("demo-1".to_owned());
+            }),
+            ("codex-signed-out", |s| {
+                s.tab = Tab::Codex;
+                s.codex.snapshot = None;
+                s.codex.problem = Some(Problem::SignedOut);
+            }),
+            ("deepseek", |s| s.tab = Tab::DeepSeek),
             ("signed-out", |s| {
-                s.snapshot = None;
-                s.problem = Some(Problem::SignedOut);
+                s.claude.snapshot = None;
+                s.claude.problem = Some(Problem::SignedOut);
             }),
         ],
         ..AppSpec::new("Nerda Bar", (ui::WINDOW_W, ui::WINDOW_H), || unreachable!(), view::view)
@@ -158,7 +195,7 @@ fn main() {
 
     let sampler = (!headless).then(|| {
         let ui = me.clone();
-        system::spawn(move |view| ui.update_if(move |s, tx| ui::apply_system(s, view, tx)))
+        system::spawn(Some(data_dir.clone()), move |view| ui.update_if(move |s, tx| ui::apply_system(s, view, tx)))
     });
 
     let (state_handle, ready_handle) = (me.clone(), me);
@@ -174,6 +211,7 @@ fn main() {
             }
             installed = true;
             status_item::set_show_used(config.show_used);
+            // Claude's item first, then this Mac's; Codex and DeepSeek add theirs once signed in.
             status_item::install(ready_handle.clone(), data_dir.clone(), "claude", "Claude", &status_item::CLAUDE_MARK);
             ready_handle.update(|s, _| {
                 s.sync_menu_bar();
@@ -187,7 +225,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_millis(600));
                     handle.update(|s, tx| {
                         if let Some(anchor) = test_anchor().or_else(|| status_item::anchor_of("claude")) {
-                            ui::open(s, anchor, Tab::Agents, tx);
+                            ui::open(s, anchor, Tab::Claude, tx);
                         }
                     });
                 });

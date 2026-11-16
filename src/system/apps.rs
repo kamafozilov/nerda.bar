@@ -26,6 +26,8 @@ pub struct AppUsage {
     pub memory: u64,
     /// A share of all the cores, 0 to 1.
     pub cpu: f32,
+    /// Bytes its processes read from and wrote to disk since the reading before.
+    pub disk: u64,
     pub processes: usize,
 }
 
@@ -44,8 +46,9 @@ pub struct Apps {
     timebase: (u64, u64),
     /// A process, known by its pid and start time (pids are reused), and its owner.
     owners: HashMap<(libc::pid_t, u64), Owner>,
-    /// Each process's CPU time at the last reading, in nanoseconds.
-    last: HashMap<(libc::pid_t, u64), u64>,
+    /// Each process's CPU time at the last reading, in nanoseconds, and the bytes it had read
+    /// and written by then.
+    last: HashMap<(libc::pid_t, u64), (u64, u64)>,
     last_at: Option<Instant>,
     responsible: Option<Responsible>,
 }
@@ -80,16 +83,21 @@ impl Apps {
             let id = (pid, usage.ri_proc_start_abstime);
             let cpu_time = (usage.ri_user_time + usage.ri_system_time) as u128 * self.timebase.0 as u128 / self.timebase.1 as u128;
             let cpu_time = cpu_time as u64;
-            let ran = match (elapsed, self.last.get(&id)) {
-                (Some(elapsed), Some(&before)) if elapsed > 0.0 => (cpu_time.saturating_sub(before) as f64 / (elapsed * cores.max(1) as f64)) as f32,
+            let disk = usage.ri_diskio_bytesread + usage.ri_diskio_byteswritten;
+            let before = self.last.get(&id).copied();
+            let ran = match (elapsed, before) {
+                (Some(elapsed), Some((before, _))) if elapsed > 0.0 => (cpu_time.saturating_sub(before) as f64 / (elapsed * cores.max(1) as f64)) as f32,
                 _ => 0.0,
             };
-            seen.insert(id, cpu_time);
+            // A process seen for the first time counts from now: what it did before is unknown.
+            let moved = before.map_or(0, |(_, before)| disk.saturating_sub(before));
+            seen.insert(id, (cpu_time, disk));
             let responsible = self.responsible;
             let owner = self.owners.entry(id).or_insert_with(|| owner_of(pid, responsible));
-            let app = apps.entry(owner.key.clone()).or_insert_with(|| AppUsage { name: owner.name.clone(), path: owner.path.clone(), memory: 0, cpu: 0.0, processes: 0 });
+            let app = apps.entry(owner.key.clone()).or_insert_with(|| AppUsage { name: owner.name.clone(), path: owner.path.clone(), memory: 0, cpu: 0.0, disk: 0, processes: 0 });
             app.memory += usage.ri_phys_footprint;
             app.cpu += ran;
+            app.disk += moved;
             app.processes += 1;
         }
         self.owners.retain(|id, _| seen.contains_key(id));
@@ -243,7 +251,7 @@ mod tests {
 
     #[test]
     fn the_top_apps_come_first_and_the_rest_add_up() {
-        let app = |name: &str, memory: u64| AppUsage { name: name.to_owned(), path: None, memory, cpu: 0.0, processes: 1 };
+        let app = |name: &str, memory: u64| AppUsage { name: name.to_owned(), path: None, memory, cpu: 0.0, disk: 0, processes: 1 };
         let apps = [app("a", 5), app("b", 30), app("c", 10), app("d", 1)];
         let (top, rest, others) = top(&apps, 2, |a| a.memory as f64);
         assert_eq!(top.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["b", "c"]);

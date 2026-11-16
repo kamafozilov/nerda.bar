@@ -29,9 +29,13 @@ const MARK: f64 = 16.0;
 pub struct Mark {
     pub path: &'static str,
     pub view: f64,
+    /// Overlapping shapes cut holes, as SVG's `evenodd` fill rule has them.
+    pub even_odd: bool,
 }
 
-pub const CLAUDE_MARK: Mark = Mark { path: include_str!("../assets/providers/claude.path"), view: 100.0 };
+pub const CLAUDE_MARK: Mark = Mark { path: include_str!("../assets/providers/claude.path"), view: 100.0, even_odd: false };
+pub const OPENAI_MARK: Mark = Mark { path: include_str!("../assets/providers/openai.path"), view: 24.0, even_odd: true };
+pub const DEEPSEEK_MARK: Mark = Mark { path: include_str!("../assets/providers/deepseek.path"), view: 24.0, even_odd: false };
 
 /// A picture drawn beside a measure's number, in place of a provider's mark.
 #[derive(Clone, Debug, PartialEq)]
@@ -255,6 +259,7 @@ fn parse_path(path: &str, scale: f64) -> Option<Vec<Segment>> {
 /// A provider's mark as a template image, which AppKit tints for the menu bar.
 fn mark_image(mark: &Mark, name: &str) -> Retained<NSImage> {
     let segments = parse_path(mark.path, MARK / mark.view).unwrap_or_default();
+    let even_odd = mark.even_odd;
     let draw = RcBlock::new(move |_rect: NSRect| -> Bool {
         let point = |p: &[f64; 2]| NSPoint::new(p[0], p[1]);
         let path = NSBezierPath::bezierPath();
@@ -265,6 +270,9 @@ fn mark_image(mark: &Mark, name: &str) -> Retained<NSImage> {
                 Segment::Curve(c1, c2, p) => path.curveToPoint_controlPoint1_controlPoint2(point(p), point(c1), point(c2)),
                 Segment::Close => path.closePath(),
             }
+        }
+        if even_odd {
+            path.setWindingRule(objc2_app_kit::NSWindingRule::EvenOdd);
         }
         NSColor::blackColor().set();
         path.fill();
@@ -357,6 +365,9 @@ pub fn remove(id: &str) {
 
 /// Adds a provider's menu bar item. Call on the main thread, after the app has started.
 pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str, mark: &Mark) {
+    if ITEMS.with_borrow(|items| items.iter().any(|item| item.id == provider)) {
+        return;
+    }
     add(app, data_dir, provider, name, Some(mark));
 }
 

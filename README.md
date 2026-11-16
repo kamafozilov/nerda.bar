@@ -30,20 +30,20 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on its Agents tab: a chart at the top of how Fable's weekly limit fell across the week beside an even pace and a projection, a meter for each limit with its reset time under it with Fable's picked, then tokens, cost, a chart and a row per model for the last 7 days, with a rail of tabs on the left"></td>
+    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on Claude's tab: a ring per limit with its reset time, Fable's weekly limit picked, extra usage, the picked limit's chart across the week beside an even pace and a projection, then tokens, cost, a chart split by model and a row per model for the last 7 days, with a rail of providers and of this Mac's measures on the left"></td>
     <td width="50%"><img src="docs/images/panel-light.png" alt="The same panel in light mode"></td>
   </tr>
 </table>
 
 <br>
 
-Nerda Bar shows how much of your Claude plan is left and what you used, and what your Mac is doing while you work: the CPU and memory in use, their history, and which apps take them, each app with all its processes together. It is a native app written in Rust with [Rune](https://github.com/anomalyco/rune), a **small download** with no account and no telemetry. Claude is the first provider; the others get their own menu bar item as they are added.
+Nerda Bar shows how much of your AI plans is left and what you used (Claude, Codex and DeepSeek), and what your Mac is doing while you work: CPU, memory, disk, network, battery and GPU, their history, and which apps take them, each app with all its processes together. It is a native app written in Rust with [Rune](https://github.com/anomalyco/rune), a **small download** with no account and no telemetry.
 
 <table>
   <tr>
-    <td width="33%" valign="top"><b>🎯 Exact</b><br>Limits are the numbers Anthropic reports. Tokens are counted from Claude Code's own logs, each message once. CPU and memory are read as Activity Monitor reads them.</td>
-    <td width="33%" valign="top"><b>🪶 Light</b><br>About 35 MB of memory. With the panel closed: one request every 5 minutes, and a few system calls every 2 seconds for each measure in the menu bar.</td>
-    <td width="33%" valign="top"><b>🔒 Private</b><br>Your login is only ever read, never renewed or rewritten. Nothing about you leaves your Mac.</td>
+    <td width="33%" valign="top"><b>🎯 Exact</b><br>Limits are the numbers each provider reports. Tokens are counted from Claude Code's and the Codex CLI's own logs, each message once. This Mac is read as Activity Monitor reads it.</td>
+    <td width="33%" valign="top"><b>🪶 Light</b><br>About 46 MB of memory. With the panel closed: one request every 5 minutes per signed-in provider, and a few system calls every 20 seconds for this Mac's history, every 2 seconds for each measure in the menu bar.</td>
+    <td width="33%" valign="top"><b>🔒 Private</b><br>Your logins are only ever read, never renewed or rewritten. Nothing about you leaves your Mac but each provider's request to its own service.</td>
   </tr>
 </table>
 
@@ -58,63 +58,84 @@ Nerda Bar shows how much of your Claude plan is left and what you used, and what
 
 ## What it shows
 
-The panel has a tab for each thing it reads, in a rail down its left side: **Agents** for your AI plan, **CPU** and **Memory** for this Mac. A click on a menu bar item opens the panel on its own tab.
+The panel has a rail down its left side: the providers by their marks (Claude, Codex, DeepSeek), then this Mac's measures (CPU, RAM, Disk, Net, Batt, GPU), and at its foot Settings and Quit. A click on a menu bar item opens the panel on its own tab.
 
-### Agents
+### Claude and Codex
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/low.png" alt="The Agents tab with a session at 7% left in red and a weekly limit at 26% left in orange, each saying when it runs out, and the weekly limit's chart at the top projecting where it runs out"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row says when.</td>
-    <td width="50%"><img src="docs/images/today.png" alt="The Agents tab showing today's usage by the hour"><br><b>Usage</b> for today by the hour, and for 7 and 30 days by the day.</td>
+    <td width="50%"><img src="docs/images/low.png" alt="Claude's tab on a Pro plan with the session at 6% left and the weekly limits at 27% and 8% left, each saying when it runs out, and Fable's weekly chart with a red Runs out pill"><br><b>Running low</b>: orange at 30% left, red at 10%, and when the pace so far uses a limit up before it resets, the row and the chart's pill say when.</td>
+    <td width="50%"><img src="docs/images/codex.png" alt="Codex's tab on ChatGPT Pro: the 5-hour and weekly limits, a free weekly reset with Use…, the weekly chart and a week of usage by model"><br><b>Codex</b>: the 5-hour and weekly limits, and the free resets the plan has been given, each spent only after you confirm it.</td>
   </tr>
 </table>
 
-**In the menu bar**, the provider's mark and a percentage: the session limit, or whichever plan-wide limit is used up and so is what blocks work. A limit on one model alone, such as Fable's weekly limit, shows beside it, each with its letter: `W 23%  F 11%`. The number turns orange at 30% left and red at 10%, and dims when it could not be refreshed.
+- **Limits**: a ring per limit (session or 5-hour, weekly, per-model weekly) filled to what is left, with a tick where an even pace would be, the time to its reset, and extra usage with its cap. Hover a ring for how far ahead or behind an even pace you are; click it to chart it.
+- **The chart**: the picked limit's window from 100% down to now, an even pace to compare against, where the pace so far leads, and a pill saying whether it lasts until the reset. Under the pointer, what was left then and what was used that day.
+- **Usage** for today by the hour, and for 7 and 30 days by the day: tokens, what they would have cost at API prices, a chart split by model, and a row per model. The bar under the pointer replaces the totals; hovering the totals splits them into input, output and cache.
+- **Problems** show as a banner over the numbers they make stale (offline, login expired, updates paused, a failed request), and the numbers fade until they are current again. Without a login, the tab says what to run, with a Copy button.
 
-**In the panel**, opened with a click:
+Claude's limit resets ("Reset for free") can only be used in Claude's own apps, so the panel doesn't offer them.
 
-- At the top, one limit's history: how it fell from 100% day by day to what is left now, an even pace to compare against, and where the pace so far leads, with a ring where it runs out or resets. Over the chart, the limit's name and what is left, what was used today and whether the pace lasts until the reset; under the pointer, what was left then and what was used that day. A week's window reads by the day, the session's by the hour.
-- Under it, every limit the plan has (session, weekly, per-model weekly, extra usage) with a meter, the time to its reset, and a tick where an even pace would be. Click a limit to show it in the chart; the one shown sits on a card, and the panel starts on the weekly limit with the least left.
-- Usage for today, 7 days and 30 days: tokens, what they would have cost at API prices, a chart and a row per model. The totals read the bar under the pointer while it is on the chart, and hold the split into input, output and cache in their tooltip. The panel's foot has Refresh, Settings and Quit; the settings (what the menu bar shows, model limits, left or used, how the CPU and memory show, Launch at Login) open in the panel. A secondary click on the menu bar item has the same as a menu.
+### DeepSeek
+
+<img src="docs/images/deepseek.png" width="50%" align="right" alt="DeepSeek's tab: a $4.20 balance split into topped up and granted, lasting about 8 days at last week's spend, and the spend per day for a week with a top-up on Tuesday">
+
+DeepSeek reports only the account's balance. The tab shows it split into topped-up and granted credit, how long it lasts at last week's spend, and the spend per day, read from how the balance fell between refreshes; a rise is a top-up.
+
+The key is read from the Keychain. Add it once in a terminal (it asks for the key, so it never lands in your shell history):
+
+```sh
+security add-generic-password -s "Nerda Bar" -a deepseek -w
+```
+
+`DEEPSEEK_API_KEY` works too when Nerda Bar is started from a shell.
+
+<br clear="right">
 
 ### This Mac
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/cpu.png" alt="The CPU tab in dark mode: 30% in use split into apps and system, an hour of history as an area chart, the apps using the most CPU with their icons, and a bar per core"><br><b>CPU</b>: the share in use, its history, the apps using it now and each core.</td>
-    <td width="50%"><img src="docs/images/memory.png" alt="The Memory tab in light mode: 12.1 GB used of 16 GB with pressure normal, a bar split into app, wired, compressed and cached memory, the apps using the most memory with their icons and process counts, an hour of history and the swap in use"><br><b>Memory</b>: what is used and what kind, how hard macOS is working to find more, and the apps holding it.</td>
+    <td width="33%"><img src="docs/images/cpu.png" alt="The CPU tab"><br><b>CPU</b>: the share in use split into apps and the system, the load average, its history, the apps using it and each core.</td>
+    <td width="33%"><img src="docs/images/memory.png" alt="The RAM tab"><br><b>RAM</b>: used memory by kind (app, wired, compressed, cached, free), pressure, the apps holding it, its history and swap.</td>
+    <td width="33%"><img src="docs/images/disk.png" alt="The Disk tab"><br><b>Disk</b>: used, purgeable and free space, read and write rates, the apps that read and wrote the most in the last hour, and other volumes with Eject.</td>
+  </tr>
+  <tr>
+    <td width="33%"><img src="docs/images/network.png" alt="The Network tab"><br><b>Network</b>: download and upload now, their history with download over the line and upload under it, what moved since midnight, and each interface.</td>
+    <td width="33%"><img src="docs/images/battery.png" alt="The Battery tab"><br><b>Battery</b>: the charge and the time left at this draw, the last day or week of charge with plugged-in stretches shaded, and its health.</td>
+    <td width="33%"><img src="docs/images/gpu.png" alt="The GPU tab"><br><b>GPU</b>: how busy it is, its rendering and geometry stages, the memory it holds, and its history.</td>
   </tr>
 </table>
 
-**CPU**: the share in use, split into apps and the system, and the load average. A chart of the last 5 minutes, hour or day, with a readout of the peak or of the moment under the pointer; the apps using the most CPU now; and a bar per core, efficiency and performance cores apart.
+**Apps** are whole apps, not processes: a browser's dozens of helpers and renderers add up to one row with its icon, saying how many processes it runs. A command line tool such as `claude` has a row of its own.
 
-**Memory**: what is used out of the Mac's memory, split as Activity Monitor splits it (app, wired, compressed, cached), and memory pressure: normal, high or critical. Then the apps holding the most memory, the same history chart, and the swap in use.
+**In the menu bar**, each measure can have an item of its own, in one of three styles: a ring filled to the share, a graph of the last half minute, or the name and number as text (`CPU 18%`, `NET ↓2.4 MB/s ↑380 KB/s`). ⌘-drag an item to move it; macOS keeps its place.
 
-**Apps** are whole apps, not processes: a browser's dozens of helpers and renderers add up to one row with its icon, saying how many processes it runs. A command line tool such as `claude` has a row of its own. Five show, and a line under them sums the rest.
+### The menu bar
 
-**In the menu bar**, the CPU and memory each get an item of their own once the settings put them there, in one of three styles: a ring filled to the share, a graph of the last half minute, or the name and number as text (`CPU 18%`). Memory turns orange when its pressure is high and red when it is critical. ⌘-drag an item to move it; macOS keeps its place.
+Each provider has an item with its mark. Claude's shows the limit the settings pick and, with model limits on, each model's own limit beside it by name: `Weekly 59%  Fable 42%`, or on a plan with a session `Session 24%  Fable 42%`. Codex shows its 5-hour or weekly limit, and DeepSeek its balance. Numbers turn orange at 30% left and red at 10%, and dim when they could not be refreshed. Codex and DeepSeek add their items once they are signed in.
 
 ### Keys
 
 | Key | Action |
 | --- | --- |
-| ⌘1, ⌘2, ⌘3 | Agents, CPU, Memory |
-| ⌘R | Refresh the limits now |
+| ⌘1 … ⌘9 | The rail's tabs in order |
+| ⌘R | Refresh the shown provider now |
 | ⌘, | Settings |
 | esc | Back from Settings, else close the panel |
 | ⌘Q | Quit |
 
 ## Where the numbers come from
 
-- **Limits** are what Anthropic reports for your login (`api.anthropic.com/api/oauth/usage`), the same numbers as Claude Code's `/usage`. They refresh every 5 minutes and when the panel opens, never more often than once a minute: the endpoint allows about 30 requests an hour, shared with Claude Code.
-- **The login** is Claude Code's, read from the Keychain item it keeps (or `~/.claude/.credentials.json`). It is only ever read. Nerda Bar never renews or rewrites it, because renewing it behind Claude Code's back can sign the CLI out; when the login has expired the panel says so, and running `claude` once renews it.
-- **The limit chart** draws what each refresh read, kept for 8 days in `history.json`. Where there are no readings (before Nerda Bar's first run, or while the Mac slept), what the limit gained across the gap is spread over its hours by what this Mac's messages to the models it counts would have cost at API prices, and drawn paler as an estimate. Use on another device shows up in the readings but not in this Mac's logs: across a gap with no activity here, the chart draws a straight line.
-- **Usage** is counted from Claude Code's own session logs under `~/.claude/projects`. Each message counts once, however many times the logs repeat it, by your local calendar day. Only what the logs gained since the last read is read again.
-- **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day and kept in `prices.json`. A model without a listed price shows `—` and the total a `+`. Fast mode's premium is not priced.
-- **CPU and memory** come from macOS itself, as Activity Monitor reads them: each core's ticks (`host_processor_info`), the memory's page counts (`host_statistics64`), memory pressure and swap (`sysctl`). None of it needs a password. They are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the panel's history needs them, and not at all with both tabs and both items off. The history is kept in memory, so it starts again when Nerda Bar does.
-- **Apps** are read only while the panel shows the CPU or Memory tab: each process's footprint (the memory figure Activity Monitor shows) and CPU time, summed by the outermost app bundle it runs from, or by the app macOS holds responsible for it. Processes of other users and of the system itself, such as WindowServer, can't be read without an administrator's password, so they are left out.
+- **Claude's limits** are what Anthropic reports for your login (`api.anthropic.com/api/oauth/usage`), the same numbers as Claude Code's `/usage`. The login is Claude Code's, read from its Keychain item (or `~/.claude/.credentials.json`) and never renewed or rewritten: renewing it behind Claude Code's back can sign the CLI out. Running `claude` once renews an expired one.
+- **Codex's limits** are what ChatGPT reports for the Codex CLI's login (`chatgpt.com/backend-api/wham/usage`), read from `~/.codex/auth.json` (or its Keychain item) and never renewed. Free resets are listed from the same service; one is spent only when you confirm it in the panel.
+- **DeepSeek's balance** is `api.deepseek.com/user/balance`, with your key.
+- Limits refresh every 5 minutes and when the panel opens, never more often than once a minute.
+- **The limit chart** draws what each refresh read, kept for 8 days (`history.json`, `codex-history.json`). Where there are no readings, what the limit gained is spread over its hours by this Mac's activity and drawn paler as an estimate.
+- **Usage** is counted from the session logs: Claude Code's under `~/.claude/projects`, each message once; the Codex CLI's under `~/.codex/sessions`, each response once. **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day.
+- **This Mac** is read from macOS itself, as Activity Monitor reads it: CPU ticks and memory pages from the kernel, disk and GPU statistics and the battery from IOKit, volumes from the file system, traffic from each interface's counters and its name from the network settings. None of it needs a password. Measures are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the history needs them, and not at all with every tab and item off. The battery's charge is kept for a week in `battery.json`; the rest of the history is kept in memory.
 
-None of it leaves your Mac, and nothing else does.
+None of it leaves your Mac, except each provider's own request to its own service.
 
 ## Settings
 
@@ -125,14 +146,20 @@ The panel's settings cover all but the last two of these. Everything lives in `~
   "menu_bar": "session",
   "menu_bar_models": true,
   "show_used": false,
+  "codex": { "menu_bar": "session", "show_used": false },
+  "deepseek_menu_bar": true,
   "cpu": { "menu_bar": "off", "tab": true },
   "memory": { "menu_bar": "off", "tab": true },
+  "disk": { "menu_bar": "off", "tab": true },
+  "network": { "menu_bar": "off", "tab": true },
+  "battery": { "menu_bar": "off", "tab": true },
+  "gpu": { "menu_bar": "off", "tab": true },
   "refresh_minutes": 5,
   "material": "popover"
 }
 ```
 
-`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left). `menu_bar_models` adds each model's own limit beside it. `cpu` and `memory` each say how their menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has their tab; with neither tab, the panel has no rail and is the Agents tab alone. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
+`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left); a plan without a session limit shows the weekly one. `menu_bar_models` adds each model's own limit beside it. Each measure says how its menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has its tab. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
 
 ## Build it yourself
 
@@ -158,6 +185,7 @@ Rune renders headlessly with sample data; nothing is read from your login or you
 target/release/nerda-bar --snap panel.png --theme dark
 target/release/nerda-bar --snap low.png --scene low --theme light
 target/release/nerda-bar --snap cpu.png --scene cpu --theme dark
+target/release/nerda-bar --snap codex.png --scene codex-confirm
 target/release/nerda-bar --list-scenes
 ```
 
@@ -165,23 +193,26 @@ target/release/nerda-bar --list-scenes
 
 ### Layout
 
-- `src/main.rs`: wiring and window options
+- `src/main.rs`: wiring, window options and the headless scenes
 - `src/ui.rs`: state, tabs, keys, open and close
-- `src/view.rs`: the panel: its rail, the Agents tab, the settings
-- `src/burn.rs`, `src/burn_view.rs`: each limit's history and the chart of its window
-- `src/system_view.rs`: the CPU and Memory tabs
+- `src/agents.rs`: each provider's state, the worker's events, the providers' menu bar items, the reset flow
+- `src/view.rs`: the panel and its rail; `src/look.rs`: colours, type and shared pieces
+- `src/agents_view.rs`, `src/burn_view.rs`, `src/resets_view.rs`: Claude's and Codex's tabs, the limit chart, free resets
+- `src/deepseek_view.rs`: DeepSeek's tab
+- `src/system_view.rs`, `src/mac_view.rs`: this Mac's tabs
+- `src/settings_view.rs`: the settings
 - `src/status_item.rs`: the menu bar items, their glyphs and their menu (AppKit)
-- `src/worker.rs`: the background thread and its schedule
-- `src/system/`: this Mac's measures: the thread that reads them (`mod.rs`), their history at three resolutions (`history.rs`), the apps behind them (`apps.rs`) and the system calls (`mac.rs`)
-- `src/claude.rs`: the Claude provider: login and limits
-- `src/stats.rs`: token counts from the session logs
+- `src/worker.rs`: the background thread and each provider's schedule
+- `src/system/`: this Mac's measures: the thread that reads them (`mod.rs`, `more.rs`), their history (`history.rs`), the apps behind them (`apps.rs`), and the readers (`mac.rs`, `disk.rs`, `net.rs`, `battery.rs`, `gpu.rs`, `iokit.rs`)
+- `src/claude.rs`, `src/codex.rs`, `src/deepseek.rs`: the providers
+- `src/stats.rs`, `src/codex_logs.rs`: token counts from the session logs
 - `src/prices.rs`: API prices
-- `src/model.rs`, `src/time.rs`, `src/config.rs`, `src/demo.rs`: limits, the clock, settings, sample data
+- `src/model.rs`, `src/time.rs`, `src/config.rs`, `src/demo.rs`, `src/icons.rs`: limits, the clock, settings, sample data, icons
 - `src/alloc.rs`: the allocator that returns large blocks to the system when freed
 
 ### Adding a provider
 
-A provider is a module that returns a `model::Snapshot` (its plan and limits), a mark in `assets/providers/`, and a call to `status_item::install` with its id. `src/claude.rs` is the one to copy.
+A provider is a module that returns a `model::Snapshot` (its plan and limits), a `Provider` variant, a mark in `assets/providers/` and `src/icons.rs`, and a job in `src/worker.rs`. `src/codex.rs` is the one to copy.
 
 ## Licence
 

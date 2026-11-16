@@ -16,6 +16,10 @@ pub struct Config {
     pub menu_bar_models: bool,
     /// Show how much of each limit is used rather than how much is left.
     pub show_used: bool,
+    /// What Codex's menu bar item shows.
+    pub codex: ProviderBar,
+    /// Whether DeepSeek's balance has an item in the menu bar.
+    pub deepseek_menu_bar: bool,
     /// Minutes between refreshes. Anthropic allows about 30 requests an hour, shared with
     /// Claude Code, so under 5 is not accepted.
     pub refresh_minutes: u32,
@@ -25,6 +29,20 @@ pub struct Config {
     pub cpu: Module,
     /// Memory's own menu bar item and tab.
     pub memory: Module,
+    pub disk: Module,
+    pub network: Module,
+    /// On a Mac without a battery the tab never shows, whatever this says.
+    pub battery: Module,
+    pub gpu: Module,
+}
+
+/// What a provider's menu bar item shows, for a provider other than Claude (whose settings
+/// keep the top-level names they had first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderBar {
+    pub menu_bar: MenuBarMetric,
+    pub show_used: bool,
 }
 
 /// How one of this Mac's measures shows: its menu bar item, and its tab in the panel.
@@ -70,7 +88,21 @@ impl MenuStyle {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { menu_bar: MenuBarMetric::Session, menu_bar_models: true, show_used: false, refresh_minutes: 5, material: "popover".to_owned(), cpu: Module::default(), memory: Module::default() }
+        Self {
+            menu_bar: MenuBarMetric::Session,
+            menu_bar_models: true,
+            show_used: false,
+            codex: ProviderBar::default(),
+            deepseek_menu_bar: true,
+            refresh_minutes: 5,
+            material: "popover".to_owned(),
+            cpu: Module::default(),
+            memory: Module::default(),
+            disk: Module::default(),
+            network: Module::default(),
+            battery: Module::default(),
+            gpu: Module::default(),
+        }
     }
 }
 

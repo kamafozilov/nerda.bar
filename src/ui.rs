@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use rune::{AppHandle, DisplayTarget, Image, ImageCache, Key, KeyEvent, OverlayPlacement, SystemMaterial, Tx};
 
-use crate::burn::History;
+use crate::agents::{Agent, DeepSeek, ResetFlow};
 use crate::config::{self, Config, MenuStyle, Module};
-use crate::model::{self, Limit, Problem, Severity, Snapshot};
-use crate::stats::StatsView;
+use crate::model::{self, Provider, Severity, Snapshot};
 use crate::status_item;
 use crate::system::{Pressure, Rate, Sampler, SystemView};
 use crate::time;
@@ -19,7 +18,7 @@ use crate::worker::{Command, Event, Worker};
 
 /// The tab's own column, and the rail of tabs beside it when there is more than one.
 pub const CONTENT_W: f32 = 344.0;
-pub const RAIL_W: f32 = 68.0;
+pub const RAIL_W: f32 = 56.0;
 pub const PANEL_W: f32 = RAIL_W + CONTENT_W;
 /// Room beside and under the panel for its shadow.
 pub const SHADOW_ROOM: f32 = 28.0;
@@ -28,7 +27,7 @@ pub const SHADOW_ROOM: f32 = 28.0;
 pub const GAP: f32 = 5.0;
 pub const WINDOW_W: f32 = PANEL_W + 2.0 * SHADOW_ROOM;
 /// Taller than the panel ever is; the panel takes the height of its content.
-pub const WINDOW_H: f32 = 880.0;
+pub const WINDOW_H: f32 = 920.0;
 
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
@@ -59,42 +58,92 @@ pub enum Page {
 /// A tab of the panel, and the menu bar item that opens it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
-    /// The AI plans' limits and usage.
-    Agents,
+    /// Claude's limits and usage.
+    Claude,
+    Codex,
+    /// DeepSeek's balance.
+    DeepSeek,
     Cpu,
     Memory,
+    Disk,
+    Network,
+    Battery,
+    Gpu,
 }
 
 impl Tab {
-    pub const SYSTEM: [Tab; 2] = [Tab::Cpu, Tab::Memory];
+    pub const SYSTEM: [Tab; 6] = [Tab::Cpu, Tab::Memory, Tab::Disk, Tab::Network, Tab::Battery, Tab::Gpu];
 
     /// The menu bar item's id.
     pub fn id(self) -> &'static str {
         match self {
-            Tab::Agents => "claude",
+            Tab::Claude => "claude",
+            Tab::Codex => "codex",
+            Tab::DeepSeek => "deepseek",
             Tab::Cpu => "cpu",
             Tab::Memory => "memory",
+            Tab::Disk => "disk",
+            Tab::Network => "network",
+            Tab::Battery => "battery",
+            Tab::Gpu => "gpu",
         }
     }
 
     pub fn from_id(id: &str) -> Tab {
         match id {
+            "codex" => Tab::Codex,
+            "deepseek" => Tab::DeepSeek,
             "cpu" => Tab::Cpu,
             "memory" => Tab::Memory,
-            _ => Tab::Agents,
+            "disk" => Tab::Disk,
+            "network" => Tab::Network,
+            "battery" => Tab::Battery,
+            "gpu" => Tab::Gpu,
+            _ => Tab::Claude,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Agents => "Agents",
+            Tab::Claude => "Claude",
+            Tab::Codex => "Codex",
+            Tab::DeepSeek => "DeepSeek",
             Tab::Cpu => "CPU",
             Tab::Memory => "Memory",
+            Tab::Disk => "Disk",
+            Tab::Network => "Network",
+            Tab::Battery => "Battery",
+            Tab::Gpu => "GPU",
         }
     }
 
     pub fn is_system(self) -> bool {
-        self != Tab::Agents
+        self.provider().is_none()
+    }
+
+    /// The provider a tab shows, for a provider's tab.
+    pub fn provider(self) -> Option<Provider> {
+        match self {
+            Tab::Claude => Some(Provider::Claude),
+            Tab::Codex => Some(Provider::Codex),
+            Tab::DeepSeek => Some(Provider::DeepSeek),
+            _ => None,
+        }
+    }
+
+    /// The rail's short name for one of this Mac's tabs.
+    pub fn short(self) -> &'static str {
+        match self {
+            Tab::Claude => "Claude",
+            Tab::Codex => "Codex",
+            Tab::DeepSeek => "DeepSeek",
+            Tab::Cpu => "CPU",
+            Tab::Memory => "RAM",
+            Tab::Disk => "Disk",
+            Tab::Network => "Net",
+            Tab::Battery => "Batt",
+            Tab::Gpu => "GPU",
+        }
     }
 }
 
@@ -151,14 +200,11 @@ pub struct Ui {
     pub material: SystemMaterial,
     /// A headless render: sample data, no menu bar item, no requests.
     pub demo: bool,
-    pub snapshot: Option<Snapshot>,
-    pub problem: Option<Problem>,
-    pub refreshing: bool,
-    pub stats: Option<Arc<StatsView>>,
-    /// Every limit's readings, for the limit chart.
-    pub history: Arc<History>,
-    /// The id of the limit the chart shows, once one was picked.
-    pub chart: Option<String>,
+    pub claude: Agent,
+    pub codex: Agent,
+    pub deepseek: DeepSeek,
+    /// Spending a Codex limit reset, from the question to its answer.
+    pub reset: ResetFlow,
     /// Where the pointer is along the limit chart, from 0 to 1.
     pub trace: Option<f32>,
     pub range: Range,
@@ -171,6 +217,8 @@ pub struct Ui {
     pub system: Option<Arc<SystemView>>,
     /// The resolution the system charts show, an index into `history::TIERS`.
     pub tier: usize,
+    /// The battery chart shows the week rather than the day.
+    pub battery_week: bool,
     /// The system chart's point under the pointer.
     pub point: Option<usize>,
     /// The rate the sampler was last asked for.
@@ -194,7 +242,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(me: AppHandle<Ui>, worker: Option<Worker>, sampler: Option<Sampler>, config: Config, data_dir: PathBuf, cached: Option<Snapshot>, demo: bool) -> Ui {
+    pub fn new(me: AppHandle<Ui>, worker: Option<Worker>, sampler: Option<Sampler>, config: Config, data_dir: PathBuf, cached: (Option<Snapshot>, Option<Snapshot>), demo: bool) -> Ui {
         let mut ui = Ui {
             me,
             worker,
@@ -202,20 +250,19 @@ impl Ui {
             config,
             data_dir,
             demo,
-            snapshot: cached,
-            problem: None,
-            refreshing: false,
-            stats: None,
-            history: Arc::new(History::default()),
-            chart: None,
+            claude: Agent { snapshot: cached.0, ..Agent::default() },
+            codex: Agent { snapshot: cached.1, ..Agent::default() },
+            deepseek: DeepSeek::default(),
+            reset: ResetFlow::Idle,
             trace: None,
             range: Range::Week,
             hovered: None,
             page: Page::Tab,
-            tab: Tab::Agents,
+            tab: Tab::Claude,
             sampler,
             system: None,
             tier: 1,
+            battery_week: false,
             point: None,
             rate: Cell::new(Rate::Off),
             images: None,
@@ -253,23 +300,35 @@ impl Ui {
 
     pub fn module(&self, tab: Tab) -> Option<Module> {
         match tab {
-            Tab::Agents => None,
+            Tab::Claude | Tab::Codex | Tab::DeepSeek => None,
             Tab::Cpu => Some(self.config.cpu),
             Tab::Memory => Some(self.config.memory),
+            Tab::Disk => Some(self.config.disk),
+            Tab::Network => Some(self.config.network),
+            Tab::Battery => Some(self.config.battery),
+            Tab::Gpu => Some(self.config.gpu),
         }
     }
 
     fn module_mut(&mut self, tab: Tab) -> Option<&mut Module> {
         match tab {
-            Tab::Agents => None,
+            Tab::Claude | Tab::Codex | Tab::DeepSeek => None,
             Tab::Cpu => Some(&mut self.config.cpu),
             Tab::Memory => Some(&mut self.config.memory),
+            Tab::Disk => Some(&mut self.config.disk),
+            Tab::Network => Some(&mut self.config.network),
+            Tab::Battery => Some(&mut self.config.battery),
+            Tab::Gpu => Some(&mut self.config.gpu),
         }
     }
 
-    /// The panel's tabs, in the rail's order.
+    /// The panel's tabs, in the rail's order. A Mac without a battery has no battery tab.
     pub fn tabs(&self) -> Vec<Tab> {
-        std::iter::once(Tab::Agents).chain(Tab::SYSTEM.into_iter().filter(|&tab| self.module(tab).is_some_and(|m| m.tab))).collect()
+        let no_battery = self.system.as_ref().is_some_and(|view| view.battery.is_none());
+        [Tab::Claude, Tab::Codex, Tab::DeepSeek]
+            .into_iter()
+            .chain(Tab::SYSTEM.into_iter().filter(|&tab| self.module(tab).is_some_and(|m| m.tab) && !(tab == Tab::Battery && no_battery)))
+            .collect()
     }
 
     /// How often this Mac's measures need reading for what shows them now.
@@ -286,8 +345,20 @@ impl Ui {
         }
     }
 
+    /// The measures beyond the CPU and memory that a tab or a menu bar item shows.
+    fn wanted(&self) -> u8 {
+        use crate::system::{WANT_BATTERY, WANT_DISK, WANT_GPU, WANT_NETWORK};
+        [(Tab::Disk, WANT_DISK), (Tab::Network, WANT_NETWORK), (Tab::Battery, WANT_BATTERY), (Tab::Gpu, WANT_GPU)]
+            .into_iter()
+            .filter(|(tab, _)| self.module(*tab).is_some_and(|m| m.tab || m.menu_bar != MenuStyle::Off))
+            .fold(0, |bits, (_, bit)| bits | bit)
+    }
+
     /// Tells the sampler the rate what is on screen needs, when it changed.
     pub fn sync_rate(&self) {
+        if let Some(sampler) = &self.sampler {
+            sampler.set_wanted(self.wanted());
+        }
         let rate = self.wanted_rate();
         if let Some(sampler) = &self.sampler
             && self.rate.replace(rate) != rate
@@ -314,76 +385,18 @@ impl Ui {
                 status_item::set(tab.id(), None, &[status_item::Part { tag: Some(tab.label().to_owned()), text: "–".to_owned(), severity: Severity::Normal }], true, tab.label());
                 continue;
             };
-            let (share, severity, series, tooltip) = match tab {
-                Tab::Memory => {
-                    let memory = view.memory.as_ref();
-                    let severity = match memory.map(|m| m.pressure) {
-                        Some(Pressure::Critical) => Severity::Critical,
-                        Some(Pressure::Warning) => Severity::Warning,
-                        _ => Severity::Normal,
-                    };
-                    let tooltip = memory.map_or_else(String::new, |m| format!("Memory: {} of {} used", system_bytes(m.used()), system_bytes(m.total)));
-                    (memory.map(|m| m.used_share()), severity, &view.memory_used, tooltip)
-                }
-                _ => {
-                    let cpu = view.cpu.as_ref();
-                    let tooltip = cpu.map_or_else(String::new, |c| format!("CPU: {:.0}% in use, {:.0}% apps, {:.0}% system", c.total() * 100.0, c.user * 100.0, c.system * 100.0));
-                    (cpu.map(|c| c.total()), Severity::Normal, &view.cpu_total, tooltip)
-                }
+            let Some(measure) = measure(view, tab) else {
+                status_item::set(tab.id(), None, &[status_item::Part { tag: Some(tab.short().to_owned()), text: "–".to_owned(), severity: Severity::Normal }], true, tab.label());
+                continue;
             };
-            let percent = share.map(|share| (share * 100.0).round().clamp(0.0, 100.0) as u8);
-            let text = percent.map_or_else(|| "–".to_owned(), |p| format!("{p}%"));
-            let glyph = match style {
-                MenuStyle::Ring => Some(status_item::Glyph::Ring(percent.unwrap_or(0))),
-                MenuStyle::Graph => Some(status_item::Glyph::Bars(SystemView::recent(series, GRAPH_BARS).iter().map(|v| (v * 100.0).round() as u8).collect())),
+            let percent = measure.share.map(|share| (share * 100.0).round().clamp(0.0, 100.0) as u8);
+            let glyph = match (style, percent) {
+                (MenuStyle::Ring, Some(percent)) => Some(status_item::Glyph::Ring(percent)),
+                (MenuStyle::Graph, _) => Some(status_item::Glyph::Bars(measure.recent.iter().map(|v| (v.clamp(0.0, 1.0) * 100.0).round() as u8).collect())),
                 _ => None,
             };
-            let tag = (style == MenuStyle::Text).then(|| if tab == Tab::Memory { "MEM".to_owned() } else { tab.label().to_owned() });
-            status_item::set(tab.id(), glyph, &[status_item::Part { tag, text, severity }], percent.is_none(), &tooltip);
-        }
-    }
-
-    /// The limits as of now: windows that ended since the refresh read as fresh.
-    pub fn limits(&self) -> Option<Snapshot> {
-        self.snapshot.as_ref().map(|snapshot| snapshot.rolled(self.now))
-    }
-
-    /// The limit the chart shows: the one picked, while the plan still has it, else the
-    /// default.
-    pub fn chart_limit<'a>(&self, snapshot: &'a Snapshot) -> Option<&'a Limit> {
-        self.chart.as_deref().and_then(|id| snapshot.limit(id)).or_else(|| model::chart_default(snapshot))
-    }
-
-    /// Puts the current limits on the menu bar item.
-    pub fn sync_menu_bar(&self) {
-        if self.demo {
-            return;
-        }
-        let limits = self.limits();
-        let shown = limits.as_ref().map(|snapshot| model::menu_bar_limits(snapshot, self.config.menu_bar, self.config.menu_bar_models)).unwrap_or_default();
-        // One limit reads alone; with several, each takes its letter.
-        let tagged = shown.len() > 1;
-        let mut parts: Vec<status_item::Part> = shown
-            .iter()
-            .map(|limit| status_item::Part { tag: tagged.then(|| model::tag(limit).to_string()), text: model::percent(limit, self.config.show_used), severity: limit.severity() })
-            .collect();
-        if parts.is_empty() {
-            parts.push(status_item::Part { tag: None, text: "–".to_owned(), severity: Severity::Normal });
-        }
-        let mut tooltip: Vec<String> = Vec::new();
-        if let Some(problem) = &self.problem {
-            tooltip.push(format!("Claude: {}", problem.title()));
-        }
-        for limit in limits.iter().flat_map(|snapshot| &snapshot.limits) {
-            let reset = limit.resets_in(self.now).map_or_else(String::new, |left| format!(", resets in {}", time::span(left)));
-            tooltip.push(format!("{}: {} left{reset}", limit.label, model::percent(limit, false)));
-        }
-        status_item::set("claude", None, &parts, self.problem.is_some(), &tooltip.join("\n"));
-    }
-
-    fn send(&self, command: Command) {
-        if let Some(worker) = &self.worker {
-            worker.send(command);
+            let tag = (style == MenuStyle::Text || glyph.is_none()).then(|| tab.short().to_uppercase());
+            status_item::set(tab.id(), glyph, &[status_item::Part { tag, text: measure.text, severity: measure.severity }], false, &measure.tooltip);
         }
     }
 }
@@ -413,7 +426,7 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     s.last_anchor = Some(anchor);
     s.now = time::unix_now();
     s.page = Page::Tab;
-    s.tab = if s.tabs().contains(&tab) { tab } else { Tab::Agents };
+    s.tab = if s.tabs().contains(&tab) { tab } else { Tab::Claude };
     s.hovered = None;
     s.point = None;
     s.trace = None;
@@ -457,6 +470,10 @@ pub fn close(s: &mut Ui, tx: &mut Tx) {
     s.hovered = None;
     s.point = None;
     s.trace = None;
+    // A question about spending a reset never waits behind a closed panel.
+    if !matches!(s.reset, ResetFlow::Resetting { .. }) {
+        s.reset = ResetFlow::Idle;
+    }
     s.me.hide();
     s.sync_rate();
 }
@@ -496,25 +513,7 @@ pub fn on_focus(s: &mut Ui, focused: bool, tx: &mut Tx) {
 
 /// An event from the worker thread.
 pub fn apply(s: &mut Ui, event: Event, tx: &mut Tx) {
-    if s.phase != Phase::Shown {
-        tx.instant();
-    }
-    s.now = time::unix_now();
-    match event {
-        Event::Refreshing => s.refreshing = true,
-        Event::Limits(Ok(snapshot)) => {
-            s.snapshot = Some(snapshot);
-            s.problem = None;
-            s.refreshing = false;
-        }
-        Event::Limits(Err(problem)) => {
-            s.problem = Some(problem);
-            s.refreshing = false;
-        }
-        Event::Stats(stats) => s.stats = Some(stats),
-        Event::History(history) => s.history = history,
-    }
-    s.sync_menu_bar();
+    crate::agents::apply(s, event, tx);
 }
 
 /// A reading of this Mac's measures. It redraws the panel only while the panel shows them.
@@ -538,6 +537,24 @@ pub fn set_tab(s: &mut Ui, tab: Tab, tx: &mut Tx) {
     s.point = None;
     s.trace = None;
     s.sync_rate();
+}
+
+pub fn set_battery_week(s: &mut Ui, week: bool) {
+    s.battery_week = week;
+}
+
+/// Ejects the volume mounted at `mount`, off the main thread: it can take a few seconds while
+/// the disk finishes writing. The next reading drops it from the list.
+pub fn eject(s: &mut Ui, mount: &std::path::Path) {
+    if s.demo {
+        return;
+    }
+    let mount = mount.to_owned();
+    std::thread::spawn(move || {
+        if let Err(reason) = crate::system::disk::eject(&mount) {
+            eprintln!("nerda-bar: can't eject {}: {reason}", mount.display());
+        }
+    });
 }
 
 pub fn set_tier(s: &mut Ui, tier: usize) {
@@ -573,7 +590,7 @@ pub fn set_module_tab(s: &mut Ui, tab: Tab, on: bool, tx: &mut Tx) {
         module.tab = on;
     }
     if !on && s.tab == tab {
-        s.tab = Tab::Agents;
+        s.tab = Tab::Claude;
     }
     save(s);
     s.sync_rate();
@@ -602,8 +619,78 @@ pub fn system_bytes(bytes: u64) -> String {
 /// Bars in a measure's menu bar graph: the last half minute at its 2-second steps.
 const GRAPH_BARS: usize = 14;
 
+/// A measure as its menu bar item shows it.
+struct Measure {
+    /// The share a ring fills, when the measure is one.
+    share: Option<f32>,
+    text: String,
+    severity: Severity,
+    /// The last half minute, each from 0 to 1, for a graph.
+    recent: Vec<f32>,
+    tooltip: String,
+}
+
+fn measure(view: &SystemView, tab: Tab) -> Option<Measure> {
+    let share_text = |share: f32| format!("{:.0}%", (share * 100.0).clamp(0.0, 100.0));
+    let scaled = |series: &[Vec<Option<crate::system::history::Point>>; 3]| {
+        let recent = SystemView::recent(series, GRAPH_BARS);
+        let top = recent.iter().copied().fold(0.0f32, f32::max).max(1.0);
+        recent.iter().map(|v| v / top).collect::<Vec<f32>>()
+    };
+    Some(match tab {
+        Tab::Memory => {
+            let memory = view.memory.as_ref()?;
+            let severity = match memory.pressure {
+                Pressure::Critical => Severity::Critical,
+                Pressure::Warning => Severity::Warning,
+                Pressure::Normal => Severity::Normal,
+            };
+            let tooltip = format!("Memory: {} of {} used", system_bytes(memory.used()), system_bytes(memory.total));
+            Measure { share: Some(memory.used_share()), text: share_text(memory.used_share()), severity, recent: SystemView::recent(&view.memory_used, GRAPH_BARS), tooltip }
+        }
+        Tab::Disk => {
+            let boot = view.disk.as_ref()?.volumes.first()?;
+            let share = boot.used() as f32 / boot.total.max(1) as f32;
+            let tooltip = format!("Disk: {} used of {}, {} available", crate::mac_view::disk_bytes(boot.used()), crate::mac_view::disk_bytes(boot.total), crate::mac_view::disk_bytes(boot.available));
+            Measure { share: Some(share), text: share_text(share), severity: Severity::Normal, recent: scaled(&view.disk_read), tooltip }
+        }
+        Tab::Network => {
+            let net = view.net.as_ref()?;
+            let (down, up) = (crate::mac_view::rate_string(net.down), crate::mac_view::rate_string(net.up));
+            Measure { share: None, text: format!("↓{down} ↑{up}"), severity: Severity::Normal, recent: scaled(&view.net_down), tooltip: format!("Network: {down} down, {up} up") }
+        }
+        Tab::Battery => {
+            let battery = view.battery.as_ref()?;
+            let severity = match battery.charge {
+                _ if battery.plugged => Severity::Normal,
+                charge if charge <= 0.1 => Severity::Critical,
+                charge if charge <= 0.2 => Severity::Warning,
+                _ => Severity::Normal,
+            };
+            let tooltip = format!("Battery: {}{}", share_text(battery.charge), if battery.charging { ", charging" } else if battery.plugged { ", plugged in" } else { "" });
+            let recent = view.charge.iter().rev().take(GRAPH_BARS).rev().map(|p| p.charge).collect();
+            Measure { share: Some(battery.charge), text: share_text(battery.charge), severity, recent, tooltip }
+        }
+        Tab::Gpu => {
+            let gpu = view.gpu.as_ref()?;
+            Measure { share: Some(gpu.busy), text: share_text(gpu.busy), severity: Severity::Normal, recent: SystemView::recent(&view.gpu_busy, GRAPH_BARS), tooltip: format!("GPU: {} busy", share_text(gpu.busy)) }
+        }
+        _ => {
+            let cpu = view.cpu.as_ref()?;
+            let tooltip = format!("CPU: {:.0}% in use, {:.0}% apps, {:.0}% system", cpu.total() * 100.0, cpu.user * 100.0, cpu.system * 100.0);
+            Measure { share: Some(cpu.total()), text: share_text(cpu.total()), severity: Severity::Normal, recent: SystemView::recent(&view.cpu_total, GRAPH_BARS), tooltip }
+        }
+    })
+}
+
+/// Refreshes the provider whose tab shows, or Claude's from elsewhere.
 pub fn refresh(s: &mut Ui) {
-    s.send(Command::Refresh);
+    s.send(Command::Refresh(s.tab.provider().unwrap_or(Provider::Claude)));
+}
+
+/// The provider whose limits the panel shows now.
+pub fn shown_provider(s: &Ui) -> Provider {
+    s.tab.provider().unwrap_or(Provider::Claude)
 }
 
 pub fn set_range(s: &mut Ui, range: Range) {
@@ -613,7 +700,8 @@ pub fn set_range(s: &mut Ui, range: Range) {
 
 /// Shows `id`'s history in the limit chart.
 pub fn select_limit(s: &mut Ui, id: &str) {
-    s.chart = Some(id.to_owned());
+    let provider = shown_provider(s);
+    s.agent_mut(provider).chart = Some(id.to_owned());
     s.trace = None;
 }
 
@@ -657,6 +745,24 @@ pub fn set_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
     s.sync_menu_bar();
 }
 
+pub fn set_codex_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
+    s.config.codex.menu_bar = metric;
+    save(s);
+    s.sync_menu_bar();
+}
+
+pub fn set_codex_show_used(s: &mut Ui, show_used: bool) {
+    s.config.codex.show_used = show_used;
+    save(s);
+    s.sync_menu_bar();
+}
+
+pub fn set_deepseek_menu_bar(s: &mut Ui, on: bool) {
+    s.config.deepseek_menu_bar = on;
+    save(s);
+    s.sync_menu_bar();
+}
+
 pub fn set_menu_bar_models(s: &mut Ui, on: bool) {
     s.config.menu_bar_models = on;
     if !s.demo {
@@ -685,7 +791,11 @@ pub fn open_settings_file(s: &mut Ui, tx: &mut Tx) {
 
 /// Switches every percentage between what is used and what is left, and remembers it.
 pub fn set_show_used(s: &mut Ui, show_used: bool) {
-    s.config.show_used = show_used;
+    if shown_provider(s) == Provider::Codex && s.page == Page::Tab {
+        s.config.codex.show_used = show_used;
+    } else {
+        s.config.show_used = show_used;
+    }
     if !s.demo {
         config::save(&s.data_dir, &s.config);
         status_item::set_show_used(show_used);
@@ -695,6 +805,7 @@ pub fn set_show_used(s: &mut Ui, show_used: bool) {
 
 pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
+        Key::Escape if matches!(s.reset, ResetFlow::Confirm(_) | ResetFlow::Failed { .. }) => crate::agents::cancel_reset(s),
         Key::Escape if s.page == Page::Settings => toggle_settings(s, tx),
         Key::Escape => close(s, tx),
         Key::Command(',') => toggle_settings(s, tx),
@@ -719,7 +830,7 @@ mod tests {
 
     fn runtime() -> Runtime<Ui> {
         let app = rune::App::new(rune::AppSpec::new("test", (WINDOW_W, WINDOW_H), || unreachable!(), crate::view::view));
-        let ui = Ui::new(app.handle(), None, None, Config::default(), PathBuf::new(), None, true);
+        let ui = Ui::new(app.handle(), None, None, Config::default(), PathBuf::new(), (None, None), true);
         let mut rt = Runtime::new(ui, crate::view::view, (WINDOW_W, WINDOW_H), Env { system_dark: true, scale: 2.0 });
         rt.on_key = Some(on_key);
         rt.frame(0.0);
@@ -729,7 +840,7 @@ mod tests {
     #[test]
     fn the_panel_draws_its_limits_and_usage() {
         let rt = runtime();
-        for key in ["panel", "limit-session", "limit-weekly", "limit-chart", "usage", "chart", "totals", "footer"] {
+        for key in ["panel", "rail", "header", "limit-weekly", "limit-weekly-fable", "limit-chart", "limit-pill", "usage", "chart", "totals", "refresh"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
         // The panel fits the window with its shadow room to spare.
@@ -762,17 +873,24 @@ mod tests {
     #[test]
     fn a_click_on_a_limit_shows_it_in_the_chart() {
         let mut rt = runtime();
-        let default = rt.state.limits().and_then(|snapshot| rt.state.chart_limit(&snapshot).map(|l| l.id.clone()));
+        let default = rt.state.claude.limits(rt.state.now).and_then(|snapshot| rt.state.claude.chart_limit(&snapshot).map(|l| l.id.clone()));
         assert_eq!(default.as_deref(), Some("weekly-fable"), "the weekly limit with the least left");
         click(&mut rt, "limit-weekly");
-        assert_eq!(rt.state.chart.as_deref(), Some("weekly"));
+        assert_eq!(rt.state.claude.chart.as_deref(), Some("weekly"));
         assert!(!rt.state.config.show_used, "a click on a limit no longer flips the percentages");
+        click(&mut rt, "limit-weekly-fable");
+        assert_eq!(rt.state.claude.chart.as_deref(), Some("weekly-fable"));
+        rt.update(|s, tx| {
+            tx.instant();
+            crate::demo::plan(s, "Pro", 76.0, 41.0, 58.0);
+        });
+        rt.frame(1.0 / 60.0);
         click(&mut rt, "limit-session");
-        assert_eq!(rt.state.chart.as_deref(), Some("session"));
-        // One chart, over the limits that pick it; every row keeps its meter.
-        let [_, chart_y, _, chart_h] = rt.presented("limit-chart").unwrap().0;
-        let [_, rows_y, _, _] = rt.presented("limits").unwrap().0;
-        assert!(chart_y + chart_h < rows_y, "the chart is over the limits");
+        assert_eq!(rt.state.claude.chart.as_deref(), Some("session"));
+        // One chart, under the limits that pick it; every row keeps its ring.
+        let [_, chart_y, _, _] = rt.presented("limit-chart").unwrap().0;
+        let [_, rows_y, _, rows_h] = rt.presented("limits").unwrap().0;
+        assert!(rows_y + rows_h < chart_y, "the chart is under the limits");
         for id in ["session", "weekly", "weekly-fable"] {
             assert!(rt.presented(&format!("limit-{id}")).is_some(), "{id} keeps its row");
         }
@@ -787,7 +905,7 @@ mod tests {
         rt.pointer_move(x + w * 0.25, y + h / 2.0);
         rt.frame(1.0 / 60.0);
         assert!(rt.state.trace.is_some_and(|at| (at - 0.25).abs() < 0.01));
-        let (fx, fy) = centre(&rt, "footer");
+        let (fx, fy) = centre(&rt, "header");
         rt.pointer_move(fx, fy);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.trace, None);
@@ -815,7 +933,7 @@ mod tests {
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.hovered, Some(5));
-        let (x, y) = centre(&rt, "footer");
+        let (x, y) = centre(&rt, "header");
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.hovered, None);
@@ -826,7 +944,7 @@ mod tests {
         let mut rt = runtime();
         click(&mut rt, "settings");
         assert_eq!(rt.state.page, Page::Settings);
-        assert!(rt.presented("limit-session").is_none() && rt.presented("settings-page").is_some());
+        assert!(rt.presented("limit-weekly").is_none() && rt.presented("settings-page").is_some());
         click(&mut rt, "menu-bar-Weekly");
         assert_eq!(rt.state.config.menu_bar, model::MenuBarMetric::Weekly);
         click(&mut rt, "percent-Used");
@@ -844,7 +962,7 @@ mod tests {
         rt.update(|s, tx| on_focus(s, false, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Hidden);
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Hidden);
     }
@@ -855,7 +973,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
     }
@@ -866,7 +984,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert!(matches!(rt.state.phase, Phase::Opening { .. }), "still hidden: its frame is for the other scale");
         // Not yet drawn at the new scale: it keeps waiting.
@@ -888,22 +1006,22 @@ mod tests {
         rt.frame(1.0 / 60.0);
         let here = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
         let there = Anchor { x: 2900.0, y: 30.0, screen: [1512.0, 3432.0], scale: 2.0 };
-        rt.update(move |s, tx| toggle(s, here, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
         // The click on the other item first takes focus from the panel, then arrives.
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
-        rt.update(move |s, tx| toggle(s, there, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, there, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
         assert_eq!(rt.state.last_anchor, Some(there));
         // And with the panel still open, the same.
-        rt.update(move |s, tx| toggle(s, here, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!((rt.state.phase, rt.state.last_anchor), (Phase::Shown, Some(here)));
         // A click on the item it is open under closes it.
-        rt.update(move |s, tx| toggle(s, here, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
         assert_eq!(rt.state.phase, Phase::Hidden);
     }
 
@@ -913,7 +1031,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Agents, tx));
+        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
         rt.update(|s, tx| { poll(s, 10.0, tx); });
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
@@ -922,15 +1040,15 @@ mod tests {
     #[test]
     fn the_rail_switches_tabs_and_each_draws_its_own() {
         let mut rt = runtime();
-        for key in ["rail", "tab-claude", "tab-cpu", "tab-memory"] {
+        for key in ["rail", "tab-claude", "tab-cpu", "tab-memory", "settings", "quit"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
         click(&mut rt, "tab-cpu");
         assert_eq!(rt.state.tab, Tab::Cpu);
-        for key in ["cpu-hero", "cpu-chart", "cpu-apps-0", "cpu-apps-rest", "cores", "core-9"] {
+        for key in ["cpu-hero", "cpu-split", "load", "cpu-chart", "chart-readout", "cpu-apps-0", "cpu-apps-rest", "cores", "core-9"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
-        assert!(rt.presented("limit-session").is_none());
+        assert!(rt.presented("limit-weekly").is_none());
         click(&mut rt, "tier-24h");
         assert_eq!(rt.state.tier, 2);
         click(&mut rt, "tab-memory");
@@ -939,7 +1057,7 @@ mod tests {
         }
         rt.key(KeyEvent { key: Key::Command('1'), mods: Mods::default() });
         rt.frame(1.0 / 60.0);
-        assert_eq!(rt.state.tab, Tab::Agents);
+        assert_eq!(rt.state.tab, Tab::Claude);
         let [_, y, _, h] = rt.presented("panel").unwrap().0;
         assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall");
     }
@@ -955,26 +1073,31 @@ mod tests {
         rt.pointer_move(x + 0.2, y + h / 2.0);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.point, Some(0));
-        let (fx, fy) = centre(&rt, "footer");
+        let (fx, fy) = centre(&rt, "header");
         rt.pointer_move(fx, fy);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.point, None);
     }
 
     #[test]
-    fn without_system_tabs_there_is_no_rail_and_a_hidden_tab_falls_back() {
+    fn a_hidden_tab_leaves_the_rail_and_falls_back() {
         let mut rt = runtime();
         click(&mut rt, "tab-cpu");
         click(&mut rt, "settings");
         click(&mut rt, "cpu-tab");
+        assert_eq!(rt.state.page, Page::Settings, "a switch keeps the settings open");
         assert!(!rt.state.config.cpu.tab);
-        assert_eq!(rt.state.tab, Tab::Agents, "the hidden tab gives way to Agents");
+        assert_eq!(rt.state.tab, Tab::Claude, "the hidden tab gives way to Claude");
         click(&mut rt, "memory-tab");
         assert!(!rt.state.config.memory.tab);
+        for tab in [Tab::Disk, Tab::Network, Tab::Battery, Tab::Gpu] {
+            click(&mut rt, &format!("{}-tab", tab.id()));
+        }
         click(&mut rt, "settings");
-        assert_eq!(rt.state.tabs(), vec![Tab::Agents]);
-        assert!(rt.presented("rail").is_none());
-        assert!(rt.presented("limit-session").is_some());
+        assert_eq!(rt.state.tabs(), vec![Tab::Claude, Tab::Codex, Tab::DeepSeek]);
+        // The rail stays for Settings and Quit, with no measures and no hairline before them.
+        assert!(rt.presented("rail").is_some() && rt.presented("tab-cpu").is_none() && rt.presented("rail-separator").is_none());
+        assert!(rt.presented("limit-weekly").is_some());
     }
 
     #[test]
@@ -987,9 +1110,63 @@ mod tests {
         rt.update(close);
         rt.state.config.memory.menu_bar = MenuStyle::Ring;
         assert_eq!(rt.state.wanted_rate(), Rate::MenuBar);
-        rt.state.config.memory = Module { menu_bar: MenuStyle::Off, tab: false };
-        rt.state.config.cpu.tab = false;
+        for tab in Tab::SYSTEM {
+            *rt.state.module_mut(tab).unwrap() = Module { menu_bar: MenuStyle::Off, tab: false };
+        }
         assert_eq!(rt.state.wanted_rate(), Rate::Off);
+    }
+
+    #[test]
+    fn each_provider_has_its_tab_and_a_reset_is_asked_before_it_is_spent() {
+        let mut rt = runtime();
+        click(&mut rt, "tab-codex");
+        for key in ["limit-session", "limit-weekly", "resets", "use-0", "limit-chart", "usage"] {
+            assert!(rt.presented(key).is_some(), "{key} is on Codex's tab");
+        }
+        click(&mut rt, "use-0");
+        assert_eq!(rt.state.reset, ResetFlow::Confirm("demo-1".to_owned()));
+        assert!(rt.presented("reset-confirm-card").is_some());
+        click(&mut rt, "reset-cancel");
+        assert_eq!(rt.state.reset, ResetFlow::Idle, "Cancel spends nothing");
+        click(&mut rt, "use-0");
+        click(&mut rt, "reset-confirm");
+        let ResetFlow::Resetting { request, .. } = rt.state.reset.clone() else { panic!("the reset runs") };
+        rt.update(|s, tx| apply(s, Event::Redeemed(crate::codex::Redeemed::Unknown("The server answered 503.".to_owned())), tx));
+        rt.frame(1.0 / 60.0);
+        assert!(matches!(&rt.state.reset, ResetFlow::Failed { certain: false, .. }), "an unanswered reset keeps the question and says so");
+        click(&mut rt, "reset-confirm");
+        assert!(matches!(&rt.state.reset, ResetFlow::Resetting { request: again, .. } if *again == request), "a retry reuses the request's id");
+        rt.update(|s, tx| apply(s, Event::Redeemed(crate::codex::Redeemed::Failed("No.".to_owned())), tx));
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.reset.clone(), rt.state.phase), (ResetFlow::Idle, Phase::Shown), "esc takes the question back before it closes the panel");
+        click(&mut rt, "tab-deepseek");
+        for key in ["balance", "balance-total", "spend", "spend-6", "top-up"] {
+            assert!(rt.presented(key).is_some(), "{key} is on DeepSeek's tab");
+        }
+    }
+
+    #[test]
+    fn the_tallest_states_still_fit_the_window() {
+        let mut rt = runtime();
+        let fits = |rt: &Runtime<Ui>, what: &str| {
+            let [_, y, _, h] = rt.presented("panel").unwrap().0;
+            assert!(y + h + SHADOW_ROOM <= WINDOW_H, "{what}: the panel is {h} tall");
+        };
+        rt.update(|s, tx| {
+            tx.instant();
+            crate::demo::plan(s, "Pro", 94.0, 73.0, 92.0);
+            s.claude.problem = Some(model::Problem::Offline("Couldn't reach Claude.".to_owned()));
+        });
+        rt.frame(1.0);
+        fits(&rt, "Claude running low and offline");
+        click(&mut rt, "tab-codex");
+        click(&mut rt, "use-0");
+        rt.frame(2.0);
+        fits(&rt, "Codex asking about a reset");
+        click(&mut rt, "settings");
+        rt.frame(3.0);
+        fits(&rt, "the settings");
     }
 
     #[test]
@@ -1003,11 +1180,11 @@ mod tests {
     #[test]
     fn a_failed_refresh_keeps_the_last_limits() {
         let mut rt = runtime();
-        let before = rt.state.snapshot.clone();
-        rt.update(|s, tx| apply(s, Event::Limits(Err(Problem::Offline("No network.".to_owned()))), tx));
+        let before = rt.state.claude.snapshot.clone();
+        rt.update(|s, tx| apply(s, Event::Limits(Provider::Claude, Err(model::Problem::Offline("No network.".to_owned()))), tx));
         rt.frame(1.0 / 60.0);
-        assert_eq!(rt.state.snapshot, before);
-        assert!(rt.state.problem.is_some());
+        assert_eq!(rt.state.claude.snapshot, before);
+        assert!(rt.state.claude.problem.is_some());
         assert!(rt.presented("problem").is_some());
     }
 }

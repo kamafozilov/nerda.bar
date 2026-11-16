@@ -16,7 +16,8 @@ use crate::model::{self, Limit, Snapshot};
 use crate::stats::Activity;
 use crate::time;
 
-const FILE: &str = "history.json";
+/// Claude's readings keep the file name they had before there were other providers.
+pub const FILE: &str = "history.json";
 /// How long readings are kept: the longest window and a day.
 const KEEP: i64 = 8 * 86_400;
 /// Readings further apart than this, with use between them, leave a gap to estimate. Refreshes
@@ -34,15 +35,15 @@ pub struct History {
 }
 
 impl History {
-    pub fn load(dir: &Path) -> History {
-        std::fs::read_to_string(dir.join(FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    pub fn load(dir: &Path, file: &str) -> History {
+        std::fs::read_to_string(dir.join(file)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
     }
 
-    pub fn save(&self, dir: &Path) {
+    pub fn save(&self, dir: &Path, file: &str) {
         if std::fs::create_dir_all(dir).is_ok()
             && let Ok(text) = serde_json::to_string(self)
         {
-            let _ = std::fs::write(dir.join(FILE), text);
+            let _ = std::fs::write(dir.join(file), text);
         }
     }
 
@@ -296,7 +297,7 @@ mod tests {
     #[test]
     fn readings_keep_the_ends_of_a_flat_run_and_a_week_and_a_day() {
         let mut history = History::default();
-        let mut snapshot = Snapshot { plan: String::new(), limits: vec![weekly(10.0)], extra: None, fetched_at: START };
+        let mut snapshot = Snapshot { plan: String::new(), limits: vec![weekly(10.0)], extra: None, fetched_at: START, resets: None };
         for step in 0..5 {
             snapshot.fetched_at = START + step * 300;
             history.record(&snapshot);

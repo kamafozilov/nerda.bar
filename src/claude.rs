@@ -127,7 +127,7 @@ pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
             let pause = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<i64>().ok());
             return Err(Problem::RateLimited { until: now + pause.unwrap_or(RATE_LIMIT_PAUSE).clamp(60, 3600) });
         }
-        _ => return Err(Problem::Failed(format!("Claude answered with HTTP {status}."))),
+        _ => return Err(Problem::Failed(format!("The server answered {status}."))),
     }
     let body = response.body_mut().read_to_string().map_err(|e| Problem::Offline(format!("Claude's answer was cut short: {e}.")))?;
     crate::debug(|| format!("usage answer: {body}"));
@@ -193,10 +193,11 @@ fn parse_usage(root: &Value, plan: String, now: i64) -> Snapshot {
             used: amount("used_credits").unwrap_or(0.0),
             limit: amount("monthly_limit").filter(|limit| *limit > 0.0),
             currency: e.get("currency").and_then(Value::as_str).unwrap_or("USD").to_owned(),
+            resets_at: reset_time(e.get("resets_at")),
         }
     });
 
-    Snapshot { plan, limits, extra, fetched_at: now }
+    Snapshot { plan, limits, extra, fetched_at: now, resets: None }
 }
 
 #[cfg(test)]
@@ -244,7 +245,7 @@ mod tests {
         assert_eq!(snapshot.limits[1].resets_at, Some(1_794_478_830));
         assert_eq!(snapshot.limits[2].resets_at, None);
         assert!(snapshot.limits[2].scoped && !snapshot.limits[0].scoped);
-        assert_eq!(snapshot.extra, Some(ExtraUsage { used: 12.4, limit: Some(50.0), currency: "USD".to_owned() }));
+        assert_eq!(snapshot.extra, Some(ExtraUsage { used: 12.4, limit: Some(50.0), currency: "USD".to_owned(), resets_at: None }));
     }
 
     #[test]
