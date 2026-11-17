@@ -3,9 +3,15 @@
 //! The login is only ever read. Claude Code rotates its refresh token when it renews the
 //! login, so renewing it from here could sign the CLI out; an expired login is reported
 //! instead and Claude Code renews it the next time it runs.
+//!
+//! An expired login costs nothing to look at again: the expiry is in the login itself, and a
+//! token the server turned down is remembered, so it is not sent again. That lets the worker
+//! re-read the login every minute and pick up a renewed one as soon as Claude Code writes it.
 
 use std::path::PathBuf;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -20,6 +26,21 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const RATE_LIMIT_PAUSE: i64 = 300;
 const SESSION_WINDOW: i64 = 5 * 3600;
 const WEEK_WINDOW: i64 = 7 * 86_400;
+
+/// A fingerprint of the last access token the server turned down, so it is not sent again.
+static REJECTED: Mutex<Option<u64>> = Mutex::new(None);
+
+fn fingerprint(token: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Whether a login is known to be unusable without asking the server: its own expiry has
+/// passed, or the server already turned its token down.
+fn known_expired(credentials: &Credentials, rejected: Option<u64>, now: i64) -> bool {
+    credentials.expires_at.is_some_and(|at| at <= now) || rejected == Some(fingerprint(&credentials.access_token))
+}
 
 pub struct Credentials {
     access_token: String,
@@ -108,7 +129,8 @@ fn plan_name(subscription: &str, tier: &str) -> String {
 pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     let credentials = credentials()?;
     let now = time::unix_now();
-    if credentials.expires_at.is_some_and(|at| at <= now) {
+    let rejected = *REJECTED.lock().unwrap_or_else(|e| e.into_inner());
+    if known_expired(&credentials, rejected, now) {
         return Err(Problem::LoginExpired);
     }
     let mut response = agent
@@ -122,7 +144,10 @@ pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     let status = response.status().as_u16();
     match status {
         200 => {}
-        401 | 403 => return Err(Problem::LoginExpired),
+        401 | 403 => {
+            *REJECTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(fingerprint(&credentials.access_token));
+            return Err(Problem::LoginExpired);
+        }
         429 => {
             let pause = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<i64>().ok());
             return Err(Problem::RateLimited { until: now + pause.unwrap_or(RATE_LIMIT_PAUSE).clamp(60, 3600) });
@@ -223,6 +248,17 @@ mod tests {
         assert_eq!(login.plan, "Ultra");
         assert!(parse_credentials(r#"{"claudeAiOauth":{"accessToken":""}}"#).is_none());
         assert!(parse_credentials(r#"{"mcpOAuth":{}}"#).is_none());
+    }
+
+    #[test]
+    fn an_expired_or_turned_down_login_is_known_without_asking() {
+        let login = |expires_at| Credentials { access_token: "abc".to_owned(), expires_at, plan: String::new() };
+        assert!(known_expired(&login(Some(100)), None, 100));
+        assert!(!known_expired(&login(Some(101)), None, 100));
+        assert!(!known_expired(&login(None), None, 100));
+        // A token the server turned down stays expired; a renewed one is tried again.
+        assert!(known_expired(&login(Some(500)), Some(fingerprint("abc")), 100));
+        assert!(!known_expired(&login(Some(500)), Some(fingerprint("renewed")), 100));
     }
 
     #[test]

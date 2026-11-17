@@ -202,7 +202,7 @@ impl Problem {
     pub fn detail(&self, now: i64) -> String {
         match self {
             Problem::SignedOut => "Run `claude` in a terminal and sign in. Nerda Bar reads that login.".to_owned(),
-            Problem::LoginExpired => "Run `claude` once to renew it. Nerda Bar never changes your login.".to_owned(),
+            Problem::LoginExpired => "Run `claude` once to renew it; the limits come back within a minute. Nerda Bar never changes your login.".to_owned(),
             Problem::RateLimited { until } => format!("Claude asked for a pause. Trying again in {}.", time::span(until - now)),
             Problem::Offline(reason) | Problem::Failed(reason) => reason.clone(),
         }

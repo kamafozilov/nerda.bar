@@ -28,6 +28,9 @@ const OPEN_SCAN_AFTER: i64 = 10;
 const OFFLINE_RETRY: i64 = 60;
 const LOGIN_RETRY: i64 = 120;
 const SIGNED_OUT_RETRY: i64 = 1800;
+/// Seconds between looks at an expired Claude login. The look is local (the Keychain, no
+/// request), so the limits come back within a minute of Claude Code renewing the login.
+const EXPIRED_RETRY: i64 = 60;
 /// The longest sleep. Waking this often keeps the schedule on the wall clock, so a Mac that
 /// slept refreshes within a minute of waking.
 const TICK: Duration = Duration::from_secs(60);
@@ -245,6 +248,7 @@ fn refresh(job: &mut Job, agent: &ureq::Agent, dir: &Path, refresh_every: i64, n
     job.last_refresh = now;
     job.scan_due = true;
     let retry = |problem: &Problem| match problem {
+        Problem::LoginExpired if provider == Provider::Claude => EXPIRED_RETRY,
         Problem::Failed(_) | Problem::LoginExpired => refresh_every,
         Problem::RateLimited { until } => until - now,
         Problem::Offline(_) => OFFLINE_RETRY,
