@@ -238,7 +238,8 @@ mod sc {
 
     impl Owned {
         fn new(object: Ref) -> Option<Owned> {
-            (!object.is_null()).then_some(Owned(object))
+            // `then`, not `then_some`: an `Owned` built from null would be dropped, and release it.
+            (!object.is_null()).then(|| Owned(object))
         }
     }
 
@@ -350,6 +351,18 @@ mod sc {
             }
             ranked.sort_by_key(|(rank, _)| *rank);
             Some(ranked.into_iter().map(|(_, service)| service).collect())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// No primary interface (asleep, or between networks) copies out null; wrapping it must
+        /// not release it on the way out, as `CFRelease(NULL)` stops the app.
+        #[test]
+        fn a_null_result_is_none() {
+            assert!(Owned::new(null()).is_none());
         }
     }
 }

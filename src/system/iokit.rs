@@ -59,7 +59,8 @@ pub(super) struct Owned(CFTypeRef);
 impl Owned {
     /// Takes ownership of what a `Create` or `Copy` call returned; `None` for null.
     fn new(raw: CFTypeRef) -> Option<Owned> {
-        (!raw.is_null()).then_some(Owned(raw))
+        // `then`, not `then_some`: an `Owned` built from null would be dropped, and release it.
+        (!raw.is_null()).then(|| Owned(raw))
     }
 
     /// The object as a dictionary, if it is one.
@@ -214,7 +215,8 @@ impl Iterator for Services {
     fn next(&mut self) -> Option<Service> {
         // SAFETY: `self.0` is a live iterator; a non-zero object is a reference we now hold.
         let object = unsafe { IOIteratorNext(self.0) };
-        (object != 0).then_some(Service(object))
+        // Lazily, so that the end of the list builds no `Service` to release.
+        (object != 0).then(|| Service(object))
     }
 }
 
@@ -264,5 +266,17 @@ impl PowerSources {
             let description = unsafe { IOPSGetPowerSourceDescription(self.blob.0, CFArrayGetValueAtIndex(self.list.0, index)) };
             Dict::borrow(description)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A null result owns nothing: wrapping it must not release it on the way out, as
+    /// `CFRelease(NULL)` stops the app.
+    #[test]
+    fn a_null_result_is_none() {
+        assert!(Owned::new(std::ptr::null()).is_none());
     }
 }
