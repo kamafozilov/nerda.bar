@@ -131,6 +131,22 @@ fn main() {
             ("disk", |s| s.tab = Tab::Disk),
             ("network", |s| s.tab = Tab::Network),
             ("battery", |s| s.tab = Tab::Battery),
+            ("battery-charging", |s| {
+                s.tab = Tab::Battery;
+                if let Some(view) = &mut s.system
+                    && let Some(battery) = &mut std::sync::Arc::make_mut(view).battery
+                {
+                    (battery.charge, battery.plugged, battery.charging, battery.minutes_left) = (0.64, true, true, Some(48));
+                }
+            }),
+            ("battery-low", |s| {
+                s.tab = Tab::Battery;
+                if let Some(view) = &mut s.system
+                    && let Some(battery) = &mut std::sync::Arc::make_mut(view).battery
+                {
+                    (battery.charge, battery.minutes_left) = (0.12, Some(26));
+                }
+            }),
             ("gpu", |s| s.tab = Tab::Gpu),
             ("memory-warning", |s| {
                 s.tab = Tab::Memory;

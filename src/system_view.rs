@@ -34,7 +34,7 @@ pub(crate) const SMALL_H: f32 = 14.0;
 const LINE: f32 = 1.75;
 const CORE_H: f32 = 44.0;
 /// An app's icon, and the column of its value.
-const ICON: f32 = 20.0;
+pub(crate) const ICON: f32 = 20.0;
 const VALUE_W: f32 = 64.0;
 /// What an app's name may take of its row before it is cut: the row less the icon, the value
 /// and the gaps between them. The process count beside it gives way first.
@@ -321,17 +321,21 @@ fn app_row(s: &Ui, l: &Look, key: String, app: &AppUsage, value: String) -> El {
         .gap(12.0)
         .center_y()
         .help(app.path.as_ref().map_or_else(|| app.name.clone(), |p| p.to_string_lossy().into_owned()))
-        .child(app_icon(s, l, app))
+        .child(app_icon(s, app))
         .child(who)
         .child(look::cell(VALUE_W, text(value).font(digits(12.0, 600.0)).color(l.text)))
 }
 
-/// An app's Finder icon, or while it loads (or for a process with none), a tile in its place.
-fn app_icon(s: &Ui, l: &Look, app: &AppUsage) -> El {
+/// An app's Finder icon; a process outside any app shows the icon every program has. Until it
+/// has decoded (the panel asks for the top apps' icons with each reading, so this is rare) its
+/// place stays empty rather than flashing a grey tile.
+fn app_icon(s: &Ui, app: &AppUsage) -> El {
     let tile = el().size(ICON, ICON);
-    match app.path.as_deref().and_then(|path| s.icon(path, ICON)) {
+    // No path is no app: `Ui::icon` gives it the program icon.
+    let path = app.path.as_deref().unwrap_or(std::path::Path::new(""));
+    match s.icon(path, ICON) {
         Some(image) => tile.pixels(image.pixels()),
-        None => tile.radius(5.0).fill(l.track),
+        None => tile,
     }
 }
 

@@ -2,7 +2,7 @@
 //! and Memory tabs' shape in `system_view`: what is in use now and its history on the left,
 //! what is behind it on the right.
 
-use rune::{Color, El, LineCap, Shape, canvas, col, el, icon, row, spacer, text};
+use rune::{Color, Easing, El, LineCap, LoopSpec, Path, Shape, canvas, col, el, icon, row, spacer, text};
 
 use crate::burn_view::dashed;
 use crate::icons;
@@ -21,8 +21,18 @@ const VOLUMES_SHOWN: usize = 3;
 const EJECT_W: f32 = 68.0;
 /// A row of the GPU's last hour.
 const STAT_H: f32 = 36.0;
-/// A GPU stage: its name, what it does and its value, over a meter.
-const STAGE_H: f32 = LINE_H + 4.0 + SMALL_H + 8.0 + 4.0;
+/// The battery drawn as a battery: its body, the room inside it, and the terminal on its end.
+const CELL_W: f32 = 132.0;
+const CELL_H: f32 = 64.0;
+const CELL_PAD: f32 = 5.0;
+const NUB_W: f32 = 6.0;
+/// The band of light that runs through the charge while it charges.
+const SHEEN_W: f32 = 48.0;
+/// A line of a figure over its caption.
+const FACT_H: f32 = LINE_H + 2.0 + SMALL_H;
+/// The GPU's rings: busy outside, then rendering, then geometry.
+const RINGS: f32 = 140.0;
+const RING_W: f32 = 11.0;
 
 /// Bytes as a disk's maker counts them, in powers of a thousand: "612 GB", "1.4 TB".
 pub fn disk_bytes(bytes: u64) -> String {
@@ -374,33 +384,56 @@ fn interface_row(l: &Look, at: usize, interface: &Interface) -> El {
 pub fn battery(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
     let battery = view.battery.as_ref()?;
     let left = battery.charge.clamp(0.0, 1.0);
-    let fill = if left <= 0.1 && !battery.plugged {
+    let low = !battery.plugged && left <= 0.2;
+    let fill = if !battery.plugged && left <= 0.1 {
         l.critical
-    } else if left <= 0.2 && !battery.plugged {
+    } else if low {
         l.warning
     } else {
         l.good
     };
-    let mut top = row().w_full().h(HERO_H).items_end().child(hero(l, percent(left), "charged".to_owned())).child(spacer());
-    if let Some(minutes) = battery.minutes_left {
-        let note = if battery.charging { "until full" } else { "left at this draw" };
-        top = top.child(col().items_end().child(text(time::span(minutes as i64 * 60)).font(figure(22.0)).color(l.text)).child(caption(l, note)));
-    }
-    let words = |words: &str, color: Color, weight: f32| text(words.to_owned()).font(digits(12.0, weight)).color(color);
-    let mut power = row().key("battery-power").h(LINE_H).gap(4.0).center_y();
-    power = match (battery.watts, battery.plugged) {
-        (Some(watts), false) => power.child(words("Drawing", l.dim, 400.0)).child(words(&format!("{watts:.1} W"), l.text, 600.0)).child(words("from the battery", l.dim, 400.0)),
-        (_, true) => power.child(words("On power adapter", l.dim, 400.0)),
-        (None, false) => power,
+    let state = match (battery.charging, battery.plugged, battery.full || left >= 0.995) {
+        (true, ..) => "Charging",
+        (false, true, true) => "Fully charged",
+        (false, true, false) => "On power adapter, not charging",
+        (false, false, _) => "On battery",
     };
-    let overview_h = stack(&[HERO_H, BAR_H, LINE_H]);
-    let overview = section("battery-hero").h(overview_h).child(top).child(look::meter(l, "battery-meter", INNER_W, BAR_H, left as f64, fill)).child(power);
+    let words = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(2.0)
+        .child(hero(l, percent(left), "charged".to_owned()))
+        .child(text(state).key("battery-state").font(font(12.0, 500.0)).color(if battery.charging { l.good_text } else { l.dim }).truncate().min_w(0.0));
+    let top = row().w_full().h(CELL_H).gap(20.0).center_y().child(battery_cell(l, left, fill, battery.charging, battery.plugged, low)).child(words);
+    let fact = |key: &'static str, value: String, meaning: &str| {
+        col().key(key).grow(1.0).min_w(0.0).h(FACT_H).gap(2.0).child(text(value).font(digits(13.0, 600.0)).color(l.text)).child(caption(l, meaning.to_owned()).truncate().min_w(0.0))
+    };
+    let mut facts = row().key("battery-power").w_full().h(FACT_H).gap(16.0);
+    if let Some(minutes) = battery.minutes_left {
+        facts = facts.child(fact("battery-time", time::span(minutes as i64 * 60), if battery.charging { "until full" } else { "left at this draw" }));
+    }
+    facts = match (battery.watts, battery.plugged) {
+        (Some(watts), false) => facts.child(fact("battery-draw", format!("{watts:.1} W"), "drawn from the battery")),
+        (_, true) => facts.child(fact("battery-source", "Adapter".to_owned(), "powers this Mac")),
+        (None, false) => facts,
+    };
+    let overview_h = stack(&[CELL_H, FACT_H]);
+    let overview = section("battery-hero").h(overview_h).child(top).child(facts);
 
     let stamp = |at: i64| if view.at as i64 - at > 20 * 3600 { time::weekday_clock(at) } else { time::clock(at, false) };
     let mut facts: Vec<(&str, String, String, Color)> = Vec::new();
-    if let Some(health) = battery.health {
-        facts.push(("Maximum capacity", "Compared with when it was new".to_owned(), percent(health), l.text));
-    }
+    let capacity = battery.health.map(|health| {
+        let worn = (1.0 - health).max(0.0);
+        col()
+            .key("battery-capacity")
+            .w_full()
+            .h(look::TALL_ROW_H)
+            .gap(6.0)
+            .justify_center()
+            .child(row().w_full().h(LINE_H).center_y().child(text("Maximum capacity").font(font(12.0, 600.0)).color(l.text)).child(spacer()).child(text(percent(health)).font(digits(13.0, 600.0)).color(l.text)))
+            .child(look::meter(l, "capacity", INNER_W, 6.0, health as f64, l.good))
+            .child(caption(l, format!("Of what it held new · {} worn", percent(worn))))
+    });
     if let Some(cycles) = battery.cycle_count {
         facts.push(("Cycle count", "Full drain-and-charge equivalents".to_owned(), cycles.to_string(), l.text));
     }
@@ -425,6 +458,11 @@ pub fn battery(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
     }
     let mut health = next_section(l, "battery-health").child(section_title(l, "Health and charging", None));
     let mut rows = col().key("health").w_full();
+    if let Some(capacity) = capacity {
+        rows = rows.child(capacity);
+    }
+    // Each row but the column's first has a hairline over it; the capacity gauge comes first.
+    let after_capacity = battery.health.is_some();
     for (at, (name, meaning, value, color)) in facts.into_iter().enumerate() {
         let mut item = row()
             .w_full()
@@ -433,7 +471,7 @@ pub fn battery(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
             .center_y()
             .child(col().grow(1.0).min_w(0.0).gap(4.0).child(text(name).font(font(12.0, 600.0)).color(l.text).truncate()).child(caption(l, meaning).truncate()))
             .child(text(value).font(digits(13.0, 600.0)).color(color));
-        if at > 0 {
+        if at > 0 || after_capacity {
             item = item.border_sides([1.0, 0.0, 0.0, 0.0], l.stroke);
         }
         rows = rows.child(item);
@@ -563,39 +601,43 @@ fn flush(shape: Shape, line: Vec<[f32; 2]>, color: Color) -> Shape {
 
 pub fn gpu(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
     let gpu = view.gpu.as_ref()?;
-    let overview = section("gpu-hero").h(stack(&[HERO_H])).child(hero(l, percent(gpu.busy), "busy".to_owned()));
+    let [busy_color, rendering_color, geometry_color] = l.series;
+    let stage = |key: &'static str, color: Color, name: &str, meaning: &str, share: f32| {
+        row()
+            .key(key)
+            .h(LINE_H)
+            .gap(8.0)
+            .center_y()
+            .help(meaning.to_owned())
+            .child(look::key_swatch(color, 8.0))
+            .child(text(name.to_owned()).font(font(12.0, 400.0)).color(l.dim))
+            .child(spacer())
+            .child(text(percent(share)).font(digits(12.0, 600.0)).color(l.text))
+    };
+    let words = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(10.0)
+        .child(hero(l, percent(gpu.busy), "busy".to_owned()))
+        .child(stage("gpu-rendering", rendering_color, "Rendering", "Drawing pixels: windows, video, games", gpu.rendering))
+        .child(stage("gpu-geometry", geometry_color, "Geometry", "Shaping 3D scenes before they are drawn", gpu.geometry));
+    let overview = section("gpu-hero")
+        .h(stack(&[RINGS]))
+        .child(row().w_full().h(RINGS).gap(20.0).center_y().child(gpu_rings(l, [gpu.busy, gpu.rendering, gpu.geometry], [busy_color, rendering_color, geometry_color])).child(words));
 
     let memory_total = view.machine.memory.max(1);
-    let stage = |key: &'static str, name: &str, meaning: String, value: String, share: f64| {
-        col()
-            .key(key)
-            .w_full()
-            .h(STAGE_H)
-            .gap(8.0)
-            .child(
-                row()
-                    .w_full()
-                    .items_end()
-                    .gap(12.0)
-                    .child(col().grow(1.0).min_w(0.0).gap(4.0).child(text(name.to_owned()).font(font(12.0, 600.0)).color(l.text)).child(caption(l, meaning).truncate()))
-                    .child(text(value).font(digits(13.0, 600.0)).color(l.text)),
-            )
-            .child(look::meter(l, "meter", INNER_W, 4.0, share, l.normal))
-    };
-    let breakdown = next_section(l, "gpu-breakdown").child(section_title(l, "Breakdown", None)).child(
-        col()
-            .w_full()
-            .gap(16.0)
-            .child(stage("gpu-rendering", "Rendering", "Drawing pixels: windows, video, games".to_owned(), percent(gpu.rendering), gpu.rendering as f64))
-            .child(stage("gpu-geometry", "Geometry", "Shaping 3D scenes before they are drawn".to_owned(), percent(gpu.geometry), gpu.geometry as f64))
-            .child(stage(
-                "gpu-memory",
-                "Memory",
-                format!("Taken from the {} of unified memory", ui::system_bytes(memory_total)),
-                ui::system_bytes(gpu.memory),
-                gpu.memory as f64 / memory_total as f64,
-            )),
-    );
+    let memory = next_section(l, "gpu-memory")
+        .h(stack(&[TITLE_H, HERO_H - 14.0, 8.0]))
+        .child(section_title(l, "Memory", Some(caption(l, "Unified, shared with the CPU"))))
+        .child(
+            row()
+                .h(HERO_H - 14.0)
+                .items_end()
+                .gap(6.0)
+                .child(text(ui::system_bytes(gpu.memory)).font(figure(22.0)).color(l.text))
+                .child(text(format!("of {}", ui::system_bytes(memory_total))).font(font(13.0, 400.0)).color(l.dim).pb(3.0)),
+        )
+        .child(look::meter(l, "gpu-memory-meter", INNER_W, 8.0, gpu.memory as f64 / memory_total as f64, busy_color));
 
     // The last hour, from the history's one-hour resolution.
     let hour = &view.gpu_busy[1];
@@ -606,9 +648,10 @@ pub fn gpu(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
     } else {
         let average = readings.iter().map(|(_, p)| p.avg).sum::<f32>() / readings.len() as f32;
         let (peak_at, top) = readings.iter().map(|&(at, p)| (at, p.max)).fold((0, f32::MIN), |best, next| if next.1 > best.1 { next } else { best });
-        let above = readings.iter().filter(|(_, p)| p.avg > 0.5).count() as i64 * TIERS[1].step;
-        let above = if above < 3600 { format!("{} min", (above + 30) / 60) } else { time::span(above) };
-        let stats = [("Average", percent(average)), ("Peak", format!("{} at {}", percent(top), point_time(view, 1, peak_at))), ("Above 50%", above)];
+        let minutes = |seconds: i64| if seconds < 3600 { format!("{} min", (seconds + 30) / 60) } else { time::span(seconds) };
+        let above = minutes(readings.iter().filter(|(_, p)| p.avg > 0.5).count() as i64 * TIERS[1].step);
+        let idle = minutes(readings.iter().filter(|(_, p)| p.max < 0.05).count() as i64 * TIERS[1].step);
+        let stats = [("Average", percent(average)), ("Peak", format!("{} at {}", percent(top), point_time(view, 1, peak_at))), ("Above 50%", above), ("Idle, under 5%", idle)];
         let mut rows = col().key("gpu-stats").w_full();
         for (at, (name, value)) in stats.into_iter().enumerate() {
             let mut item = row().w_full().h(STAT_H).center_y().child(text(name).font(font(12.0, 400.0)).color(l.dim)).child(spacer()).child(text(value).font(digits(12.0, 600.0)).color(l.text));
@@ -632,5 +675,79 @@ pub fn gpu(s: &Ui, l: &Look, view: &SystemView) -> Option<[El; 2]> {
         },
     };
     let history = section("gpu-history").h(BODY_H).child(tiers_title(s, l, "History")).child(chart).child(axis(view, tier, l)).child(readout);
-    Some([col().w_full().child(overview).child(breakdown).child(last_hour), history])
+    Some([col().w_full().child(overview).child(memory).child(last_hour), history])
+}
+
+/// The GPU as three rings filled clockwise from the top: busy outside, rendering and geometry
+/// inside it. A light runs round the outer ring, faster the busier the GPU is, so the load
+/// shows at a glance; it stops when the GPU is idle.
+fn gpu_rings(l: &Look, shares: [f32; 3], colors: [Color; 3]) -> El {
+    let c = RINGS / 2.0;
+    let radius = |at: usize| c - RING_W / 2.0 - 1.0 - at as f32 * (RING_W + 3.0);
+    let mut shape = Shape::new();
+    for (at, (share, color)) in shares.into_iter().zip(colors).enumerate() {
+        let r = radius(at);
+        shape = shape.stroke_path(&arc(c, r, 0.0, 1.0), RING_W, LineCap::Butt, color.alpha(0.18));
+        let share = share.clamp(0.0, 1.0);
+        if share > 0.0 {
+            shape = shape.stroke_path(&arc(c, r, 0.0, share.max(0.01)), RING_W, LineCap::Round, color);
+        }
+    }
+    let mut rings = el().key("gpu-rings").size(RINGS, RINGS).child(canvas(shape).size(RINGS, RINGS).label(format!("GPU {} busy", percent(shares[0]))));
+    if shares[0] >= 0.02 {
+        let glint = Shape::new().stroke_path(&arc(c, radius(0), 0.0, 0.07), RING_W - 3.0, LineCap::Round, Color::WHITE.alpha(if l.dark { 0.55 } else { 0.7 }));
+        let period = (1.4 / shares[0] as f64).clamp(1.2, 14.0);
+        rings = rings.child(canvas(glint).key("gpu-glint").absolute(0.0, 0.0).size(RINGS, RINGS).looping(LoopSpec::rotation(period)));
+    }
+    rings
+}
+
+/// A circle's arc of radius `r` round (`c`, `c`), clockwise from the top, from turn `from` to `to`.
+fn arc(c: f32, r: f32, from: f32, to: f32) -> Path {
+    let at = |turn: f32| {
+        let angle = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        [c + r * angle.cos(), c + r * angle.sin()]
+    };
+    let steps = ((to - from) * 120.0).ceil().max(1.0) as usize;
+    let mut path = Path::new().move_to(at(from));
+    for step in 1..=steps {
+        path = path.line_to(at(from + (to - from) * step as f32 / steps as f32));
+    }
+    path
+}
+
+/// The battery drawn as a battery: a body filled to `charge` in the state's colour, its terminal
+/// on the end. While it charges a band of light runs through the charge and a bolt sits on it;
+/// on the adapter, the bolt alone; running low on battery, the charge pulses slowly.
+fn battery_cell(l: &Look, charge: f32, fill: Color, charging: bool, plugged: bool, low: bool) -> El {
+    let (inner_w, inner_h) = (CELL_W - 2.0 * CELL_PAD, CELL_H - 2.0 * CELL_PAD);
+    let level_w = if charge > 0.0 { (inner_w * charge).max(10.0) } else { 0.0 };
+    let mut level = el().key("battery-level").w(level_w).h(inner_h).radius(10.0).continuous_corners().fill(fill).clip_rounded(10.0).animate_layout();
+    if charging && level_w > SHEEN_W / 2.0 {
+        let sheen = el()
+            .key("battery-sheen")
+            .absolute(0.0, 0.0)
+            .size(SHEEN_W, inner_h)
+            .linear_gradient(std::f32::consts::FRAC_PI_2, [(0.0, Color::WHITE.alpha(0.0)), (0.5, Color::WHITE.alpha(0.38)), (1.0, Color::WHITE.alpha(0.0))])
+            .looping(LoopSpec::slide(2.0, [-1.0, 0.0], [level_w / SHEEN_W, 0.0]).easing(Easing::LINEAR));
+        level = level.child(sheen);
+    }
+    if low {
+        level = level.looping(LoopSpec::opacity(1.6, 0.0, 0.5, 1.0));
+    }
+    let mut body = el()
+        .key("battery-cell")
+        .size(CELL_W, CELL_H)
+        .padding(CELL_PAD)
+        .radius(16.0)
+        .continuous_corners()
+        .border(2.5, l.dim)
+        .label(format!("Battery {} charged{}", percent(charge), if charging { ", charging" } else { "" }))
+        .child(level);
+    if plugged {
+        // The bolt is white on the charge, and the text colour where the body is still empty.
+        let bolt_color = if charge >= 0.58 { Color::WHITE } else { l.text };
+        body = body.child(row().absolute(0.0, 0.0).size(CELL_W, CELL_H).center().child(icon(&icons::ZAP, 26.0).color(bolt_color)));
+    }
+    row().gap(3.0).center_y().child(body).child(el().size(NUB_W, 22.0).corners([0.0, 4.0, 4.0, 0.0]).fill(l.dim))
 }

@@ -26,6 +26,20 @@ pub const WINDOW_W: f32 = PANEL_W + 2.0 * SHADOW_ROOM;
 /// The panel has one size on every tab, so the window is the panel and its shadow's room.
 pub const WINDOW_H: f32 = PANEL_H + GAP + SHADOW_ROOM;
 
+/// Decoded app icons kept before the cache starts over, and how many of each tab's top apps
+/// are decoded ahead of being shown.
+const ICONS_KEPT: usize = 256;
+const ICONS_AHEAD: usize = 16;
+/// A program like any other: its icon stands for every program that isn't an app.
+const PROGRAM_ICON: &str = "/bin/ls";
+
+/// The path whose icon shows for `path`: its app bundle's, or for a program outside an app, the
+/// one every program has.
+fn icon_source(path: &std::path::Path) -> &std::path::Path {
+    let in_app = path.components().any(|part| part.as_os_str().to_str().is_some_and(|name| name.ends_with(".app")));
+    if in_app { path } else { std::path::Path::new(PROGRAM_ICON) }
+}
+
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
 const SAME_CLICK_SECONDS: f64 = 0.35;
@@ -299,12 +313,26 @@ impl Ui {
         ui
     }
 
-    /// The Finder icon of an app bundle or a tool, `size` points square, once it has decoded.
+    /// The Finder icon of an app bundle, `size` points square, once it has decoded. A program
+    /// outside any app (a daemon, a command-line tool, a script) shows the one icon macOS gives
+    /// every program, so they all share a single decoded image, and so does an icon that
+    /// couldn't be read.
     pub fn icon(&self, path: &std::path::Path, size: f32) -> Option<Image> {
+        let image = self.request_icon(icon_source(path), size)?;
+        if image.error().is_some() {
+            return self.request_icon(std::path::Path::new(PROGRAM_ICON), size).filter(|image| image.error().is_none());
+        }
+        Some(image)
+    }
+
+    /// `path`'s icon, decoded off the main thread the first time it is asked for, and ready
+    /// or failed now.
+    fn request_icon(&self, path: &std::path::Path, size: f32) -> Option<Image> {
         let cache = self.images.as_ref()?;
         let mut icons = self.icons.borrow_mut();
-        // Apps come and go: forget the lot now and then rather than track which still show.
-        if icons.len() > 96 {
+        // Apps come and go: forget the lot now and then rather than track which still show. An
+        // icon is a few kilobytes, so this many is still small.
+        if icons.len() > ICONS_KEPT {
             icons.clear();
         }
         let image = icons.entry(path.to_owned()).or_insert_with(|| cache.app_icon_scaled(path, size, 2.0)).clone();
@@ -312,7 +340,23 @@ impl Ui {
             // A headless render is one frame: it can't wait for the icon to arrive later.
             let _ = image.wait();
         }
-        (image.is_ready() && image.error().is_none()).then_some(image)
+        image.is_ready().then_some(image)
+    }
+
+    /// Starts decoding the icons of the apps this Mac's tabs would list, so they are there when
+    /// the panel shows them rather than arriving a moment after.
+    fn prefetch_icons(&self, view: &SystemView) {
+        let Some(apps) = view.apps.as_deref() else { return };
+        let mut order: Vec<&crate::system::apps::AppUsage> = apps.iter().collect();
+        let measures: [fn(&crate::system::apps::AppUsage) -> f64; 3] = [|app| app.cpu as f64, |app| app.memory as f64, |app| app.disk as f64];
+        for measure in measures {
+            order.sort_unstable_by(|a, b| measure(b).total_cmp(&measure(a)));
+            for app in order.iter().take(ICONS_AHEAD) {
+                if let Some(path) = app.path.as_deref() {
+                    self.request_icon(icon_source(path), crate::system_view::ICON);
+                }
+            }
+        }
     }
 
     pub fn module(&self, tab: Tab) -> Option<Module> {
@@ -574,6 +618,7 @@ pub fn apply_system(s: &mut Ui, view: Arc<SystemView>, tx: &mut Tx) -> bool {
     if !shown {
         tx.instant();
     }
+    s.prefetch_icons(&view);
     s.system = Some(view);
     s.sync_system_items();
     shown

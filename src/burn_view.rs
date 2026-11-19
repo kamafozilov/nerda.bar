@@ -24,6 +24,8 @@ const TITLE_H: f32 = 32.0;
 const BELOW: f32 = 5.0;
 const AXIS_H: f32 = 14.0;
 const LEGEND_H: f32 = 14.0;
+/// The projection's label on the chart.
+const LABEL_H: f32 = 18.0;
 const LINE: f32 = 2.0;
 /// The narrowest column that still gets its name under the chart.
 const LABEL_MIN_W: f32 = 22.0;
@@ -187,7 +189,7 @@ fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Opt
     shape = stroke_run(shape, run, run_source, color, faded);
 
     let last = line.last().copied().unwrap_or([0.0, y(0.0)]);
-    let mut label: Option<(String, [f32; 2])> = None;
+    let mut label: Option<(String, [f32; 2], [f32; 2])> = None;
     if let Some(ahead) = curve.projection {
         let end = [x(ahead.at), y(ahead.used)];
         shape = dashed(shape, last, end, 0.01, 5.0, 2.5, LineCap::Round, color);
@@ -195,7 +197,7 @@ fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Opt
         shape = shape.line(end, [end[0] + 0.01, end[1]], 10.0, LineCap::Round, color).line(end, [end[0] + 0.01, end[1]], 6.0, LineCap::Round, l.solid());
         let shown = if show_used { ahead.used } else { 100.0 - ahead.used };
         let words = if curve.runs_out { "Used up".to_owned() } else { format!("{}% at reset", shown.round().clamp(0.0, 100.0) as i64) };
-        label = Some((words, end));
+        label = Some((words, last, end));
     }
     shape = shape.line(last, [last[0] + 0.01, last[1]], 8.0, LineCap::Round, color);
 
@@ -219,13 +221,28 @@ fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Opt
                 }
             }),
     );
-    // What the projection comes to, over the ring at its end, kept inside the chart.
-    if let Some((words, [ex, ey])) = label.filter(|_| moment.is_none()) {
-        let label_w = 90.0;
-        let lx = (ex - label_w / 2.0).clamp(0.0, w - label_w);
-        let ly = if curve.runs_out { ey - 30.0 } else { ey - 34.0 }.max(0.0);
-        let anchor = if ex > w - label_w / 2.0 { row().justify_end() } else { row().center() };
-        area = area.child(anchor.absolute(lx, ly).w(label_w).child(text(words).key("limit-label").font(digits(11.0, 600.0)).color(color)));
+    // What the projection comes to, by the ring at its end and clear of the projection: above
+    // it where there is room, else under it, on a patch of the panel so no line runs through it.
+    if let Some((words, start, [ex, ey])) = label.filter(|_| moment.is_none()) {
+        let label_w = words.chars().count() as f32 * 6.6 + 8.0;
+        let lx = (ex - label_w + 6.0).clamp(0.0, w - label_w);
+        // Where the projection runs across the label's width.
+        let at = |px: f32| if (ex - start[0]).abs() < 1.0 { ey } else { start[1] + (ey - start[1]) * ((px - start[0]) / (ex - start[0])).clamp(0.0, 1.0) };
+        let (high, low) = (at(lx).min(at(lx + label_w)), at(lx).max(at(lx + label_w)).max(ey));
+        let above = high - LABEL_H - 8.0;
+        let ly = if above >= 0.0 { above } else { (low + 10.0).min(h - LABEL_H) };
+        area = area.child(
+            row()
+                .key("limit-label")
+                .absolute(lx, ly)
+                .w(label_w)
+                .h(LABEL_H)
+                .px(4.0)
+                .radius(4.0)
+                .fill(l.solid())
+                .center()
+                .child(text(words).font(digits(11.0, 600.0)).color(color)),
+        );
     }
     area
 }

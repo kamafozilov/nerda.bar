@@ -104,8 +104,8 @@ security add-generic-password -s "Nerda Bar" -a deepseek -w
   </tr>
   <tr>
     <td width="33%"><img src="docs/images/network.png" alt="The Network tab"><br><b>Network</b>: download and upload now, their history with download over the line and upload under it, what moved since midnight, and each interface.</td>
-    <td width="33%"><img src="docs/images/battery.png" alt="The Battery tab"><br><b>Battery</b>: the charge and the time left at this draw, the last day or week of charge with plugged-in stretches shaded, and its health.</td>
-    <td width="33%"><img src="docs/images/gpu.png" alt="The GPU tab"><br><b>GPU</b>: how busy it is, its rendering and geometry stages, the memory it holds, and its history.</td>
+    <td width="33%"><img src="docs/images/battery.png" alt="The Battery tab: a battery drawn filled to 73%, the time left at this draw and the power drawn, its capacity against new, and the last day of charge"><br><b>Battery</b>: the battery drawn filled to its charge (a light runs through it while it charges, it pulses when low), the time left, its capacity against new and its health, and the last day or week of charge with plugged-in stretches shaded.</td>
+    <td width="33%"><img src="docs/images/gpu.png" alt="The GPU tab: three rings for busy, rendering and geometry, the memory it holds, the last hour and its history"><br><b>GPU</b>: how busy it is, with rendering and geometry, as three rings (a light runs round them, faster the busier the GPU), the memory it holds, the last hour and its history.</td>
   </tr>
 </table>
 
