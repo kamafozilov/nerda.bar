@@ -2,14 +2,17 @@
 //! many are left and when they expire, and a "Use…" that asks before spending one, says what
 //! it will do to each limit, locks while the request runs and reports how it went.
 
-use rune::{Color, El, col, el, icon, row, spacer, text};
+use rune::{Color, El, col, el, icon, row, text};
 
 use crate::agents::{self, ResetFlow};
 use crate::icons;
-use crate::look::{Look, PAD_X, caption, digits, font};
+use crate::look::{GAP, Look, PAD_Y, TALL_ROW_H, TITLE_H, caption, digits, font, next_section, section_title};
 use crate::model::{self, Resets, Snapshot};
 use crate::time;
 use crate::ui::Ui;
+
+/// The line under the resets saying one was just used.
+const DONE_H: f32 = 20.0;
 
 /// One kind of reset: its title, the ids of the credits of that kind, and when the soonest
 /// expires.
@@ -43,18 +46,16 @@ fn expiry(at: i64, now: i64) -> String {
     if at - now > 300 * 86_400 { time::date(at) } else { format!("{} {month}, {}", date.day_of_month, time::clock(at, false)) }
 }
 
-pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> El {
-    let mut body = col()
-        .key("resets")
-        .w_full()
-        .px(PAD_X - 8.0)
-        .pt(8.0)
-        .pb(6.0)
-        .child(row().w_full().px(8.0).pb(4.0).center_y().child(text("Free resets").font(font(13.0, 700.0)).color(l.text)).child(spacer()).child(caption(l, format!("{} available", resets.available))));
+/// The plan's free resets, a fixed-height row per kind, and the height the section takes. While
+/// a reset is being asked about, its question takes the row's place and the column's room.
+pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> (El, f32) {
+    let mut body = next_section(l, "resets").child(section_title(l, "Free resets", Some(caption(l, format!("{} available", resets.available)))));
+    let mut height = 2.0 * PAD_Y + TITLE_H;
     if resets.credits.is_empty() {
-        return body.child(caption(l, "Use them in ChatGPT, or refresh to list them here.").px(8.0).pb(6.0));
+        return (body.child(caption(l, "Use them in ChatGPT, or refresh to list them here.")), height + GAP + 14.0);
     }
     for (at, kind) in kinds(resets).into_iter().enumerate() {
+        height += GAP + TALL_ROW_H;
         let asked = s.reset.credit().is_some_and(|credit| kind.credits.contains(&credit));
         if asked {
             body = body.child(confirm(s, l, snapshot, &kind));
@@ -62,31 +63,31 @@ pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> El {
         }
         let count = kind.credits.len();
         let expires = kind.expires.map(|at| format!("{} {}", if count > 1 && kind.same_expiry { "All expire" } else { "Expires" }, expiry(at, s.now)));
+        let second = match (kind.description, expires) {
+            (Some(description), Some(expires)) => format!("{description} · {expires}"),
+            (Some(words), None) => words.to_owned(),
+            (None, Some(words)) => words,
+            (None, None) => String::new(),
+        };
         let first = kind.credits[0].to_owned();
-        let mut words = col()
+        let words = col()
             .grow(1.0)
             .min_w(0.0)
-            .gap(1.0)
+            .gap(2.0)
             .child(
                 row()
                     .gap(6.0)
                     .center_y()
-                    .child(text(kind.title.to_owned()).font(font(12.5, 600.0)).color(l.text).truncate().min_w(0.0))
-                    .child(row().px(6.0).py(1.0).radius(5.0).fill(l.chip).child(text(format!("{count} left")).font(digits(10.5, 600.0)).color(l.dim))),
-            );
-        if let Some(description) = kind.description {
-            words = words.child(text(description.to_owned()).font(font(11.0, 400.0)).color(l.dim).truncate());
-        }
-        if let Some(expires) = expires {
-            words = words.child(text(expires).font(digits(11.0, 400.0)).color(l.faint));
-        }
+                    .child(text(kind.title.to_owned()).font(font(12.0, 600.0)).color(l.text).truncate().min_w(0.0))
+                    .child(row().h(16.0).px(6.0).radius(5.0).center().fill(l.chip).child(text(format!("{count} left")).font(digits(11.0, 600.0)).color(l.dim))),
+            )
+            .child(text(second).font(digits(11.0, 400.0)).color(l.faint).truncate().min_w(0.0));
         let busy = matches!(s.reset, ResetFlow::Resetting { .. });
         body = body.child(
             row()
                 .key(format!("reset-{at}"))
                 .w_full()
-                .py(6.0)
-                .px(8.0)
+                .h(TALL_ROW_H)
                 .gap(10.0)
                 .center_y()
                 .child(tile(l, l.normal, false))
@@ -95,9 +96,10 @@ pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> El {
         );
     }
     if s.reset == ResetFlow::Done {
-        body = body.child(row().key("reset-done").px(8.0).py(4.0).gap(6.0).center_y().child(el().size(6.0, 6.0).radius(3.0).fill(l.good)).child(text("Reset just now. The limits read again.").font(font(11.5, 500.0)).color(l.good)));
+        height += GAP + DONE_H;
+        body = body.child(row().key("reset-done").h(DONE_H).gap(6.0).center_y().child(el().size(6.0, 6.0).radius(3.0).fill(l.good)).child(text("Reset just now. The limits read again.").font(font(12.0, 500.0)).color(l.good_text)));
     }
-    body
+    (body, height)
 }
 
 fn tile(l: &Look, color: Color, failed: bool) -> El {
@@ -109,13 +111,13 @@ fn button(l: &Look, label: &str, primary: bool) -> El {
         .role("button")
         .label(label.to_owned())
         .h(24.0)
-        .px(12.0)
-        .radius(7.0)
+        .px(10.0)
+        .radius(6.0)
         .continuous_corners()
         .center()
         .fill(if primary { l.normal } else { l.chip })
-        .hover(l.hover)
-        .child(text(label.to_owned()).font(font(11.5, 600.0)).color(if primary { rune::Color::WHITE } else { l.text }))
+        .hover(if primary { l.normal } else { l.chip_on })
+        .child(text(label.to_owned()).font(font(11.0, 600.0)).color(if primary { rune::Color::WHITE } else { l.text }))
 }
 
 /// The question, in place of the reset's row: what each limit becomes, that it can't be
@@ -146,10 +148,10 @@ fn confirm(s: &Ui, l: &Look, snapshot: &Snapshot, kind: &Kind) -> El {
                 .w_full()
                 .gap(6.0)
                 .center_y()
-                .child(text(label).font(font(11.5, 400.0)).color(l.dim).truncate().grow(1.0).min_w(0.0))
-                .child(text(model::percent(limit, false)).font(digits(11.5, 400.0)).color(l.dim))
+                .child(text(label).font(font(12.0, 400.0)).color(l.dim).truncate().grow(1.0).min_w(0.0))
+                .child(text(model::percent(limit, false)).font(digits(12.0, 400.0)).color(l.dim))
                 .child(icon(&icons::ARROW_RIGHT, 11.0).color(l.faint))
-                .child(text(match failed { Some((_, true)) => "unchanged".to_owned(), Some((_, false)) => "unknown".to_owned(), None => "100% left".to_owned() }).font(digits(11.5, 600.0)).color(if failed.is_some() { l.dim } else { l.good })),
+                .child(text(match failed { Some((_, true)) => "unchanged".to_owned(), Some((_, false)) => "unknown".to_owned(), None => "100% left".to_owned() }).font(digits(12.0, 600.0)).color(if failed.is_some() { l.dim } else { l.good_text })),
         );
     }
     let note = match failed {
@@ -174,9 +176,9 @@ fn confirm(s: &Ui, l: &Look, snapshot: &Snapshot, kind: &Kind) -> El {
         .continuous_corners()
         .fill(l.card)
         .border(1.5, edge)
-        .child(row().gap(10.0).center_y().child(tile(l, edge, failed.is_some())).child(text(title).font(font(12.5, 600.0)).color(l.text)))
+        .child(row().gap(10.0).center_y().child(tile(l, edge, failed.is_some())).child(text(title).font(font(13.0, 600.0)).color(l.text)))
         .child(effects)
-        .child(text(note).font(font(11.0, 400.0).lh(15.0)).color(l.faint).w_full().wrap())
+        .child(text(note).font(font(11.0, 400.0)).color(l.faint).w_full().wrap())
         .child(buttons)
 }
 

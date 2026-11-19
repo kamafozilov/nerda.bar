@@ -1,11 +1,11 @@
 //! Token statistics from the Codex CLI's session logs: every response of the last 30 days under
-//! `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`, counted by local hour and model, in the
-//! same shape as Claude Code's (see `stats`).
+//! `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`, counted by local hour, model and project
+//! folder, in the same shape as Claude Code's (see `stats`).
 //!
 //! A session's `token_count` events carry its running total, and the same total is written
 //! again whenever new rate limits arrive, so each response counts as the rise of the total
-//! since the event before. The model is the one the latest `turn_context` line names. Files are
-//! read from where the last scan stopped.
+//! since the event before. The model and the working directory are the ones the latest
+//! `turn_context` line names. Files are read from where the last scan stopped.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -24,6 +24,8 @@ use crate::time;
 struct Cursor {
     offset: u64,
     model: String,
+    /// The session's working directory.
+    cwd: String,
     /// The session's running total: input, cached input, cache writes, output.
     total: [u64; 4],
 }
@@ -88,6 +90,9 @@ impl CodexLogs {
                 if let Some(model) = payload.and_then(|p| p.get("model")).and_then(Value::as_str) {
                     cursor.model = model.to_owned();
                 }
+                if let Some(cwd) = payload.and_then(|p| p.get("cwd")).and_then(Value::as_str) {
+                    cursor.cwd = cwd.to_owned();
+                }
                 false
             }
             Some("event_msg") if payload.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("token_count") => {
@@ -110,7 +115,7 @@ impl CodexLogs {
                 tokens[CACHE_WRITE_5M] = written;
                 tokens[OUTPUT] = output;
                 let model = if cursor.model.is_empty() { "gpt" } else { cursor.model.as_str() };
-                self.counts.record(at, model, tokens);
+                self.counts.record(at, model, &cursor.cwd, tokens);
                 true
             }
             _ => false,
@@ -165,7 +170,7 @@ mod tests {
             )
         };
         let lines = [
-            format!(r#"{{"timestamp":"{}","type":"turn_context","payload":{{"turn_id":"t","model":"gpt-5.1-codex"}}}}"#, at(300)),
+            format!(r#"{{"timestamp":"{}","type":"turn_context","payload":{{"turn_id":"t","cwd":"/work/nerda.bar","model":"gpt-5.1-codex"}}}}"#, at(300)),
             count(200, 1000, 400, 50),
             // The same total again, when rate limits arrived: no new tokens.
             count(190, 1000, 400, 50),
@@ -181,6 +186,9 @@ mod tests {
         assert_eq!(today.tokens[CACHE_READ], 1400);
         assert_eq!(today.tokens[OUTPUT], 80);
         assert_eq!(today.models[0].name, "gpt-5.1-codex");
+        assert_eq!(today.projects.len(), 1);
+        assert_eq!((today.projects[0].name.as_str(), today.projects[0].path.as_str()), ("nerda.bar", "/work"));
+        assert_eq!(today.projects[0].tokens, today.total());
         assert!(!logs.scan(now), "nothing new on a second scan");
         std::fs::remove_dir_all(&dir).unwrap();
     }

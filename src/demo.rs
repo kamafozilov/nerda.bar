@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::burn::{self, History};
 use crate::model::{ExtraUsage, Limit, Snapshot};
-use crate::stats::{Activity, Bar, ModelRow, RangeView, StatsView};
+use crate::stats::{Activity, Bar, ModelRow, ProjectRow, RangeView, StatsView};
 use crate::time::{self, MONTHS, WEEKDAYS};
 use crate::ui::Ui;
 
@@ -68,6 +68,7 @@ fn codex(ui: &mut Ui) {
             ModelRow { name: "gpt-5.1".to_owned(), tokens: total * 23 / 100, cost: Some(cost * 0.2) },
             ModelRow { name: "gpt-5.1-codex-mini".to_owned(), tokens: total * 7 / 100, cost: Some(cost * 0.04) },
         ];
+        view.projects = projects(total, cost);
         for bar in &mut view.bars {
             bar.parts = [bar.tokens * 70 / 100, bar.tokens * 23 / 100, bar.tokens - bar.tokens * 93 / 100, 0];
             bar.tokens /= 3;
@@ -213,5 +214,28 @@ fn range(now: i64, days: i32) -> RangeView {
             share("claude-sonnet-5-5", 0.09, 0.06),
             share("claude-haiku-5-5", 0.04, 0.01),
         ],
+        projects: projects(total, cost),
     }
+}
+
+/// `total` tokens costing `cost`, spread over seven project folders: three busy ones, then a
+/// few small ones, the last taking what rounding left.
+fn projects(total: u64, cost: f64) -> Vec<ProjectRow> {
+    let shares = [
+        ("nerda.bar", "~/Developer", 0.33, 0.348),
+        ("gray-area", "~/Developer", 0.23, 0.248),
+        ("rune", "~/Developer/oss", 0.16, 0.169),
+        ("dotfiles", "~", 0.08, 0.07),
+        ("nerda.say", "~/Developer", 0.08, 0.062),
+        ("notes", "~/Documents", 0.07, 0.055),
+        ("scratch", "/tmp", 0.05, 0.048),
+    ];
+    let mut rows: Vec<ProjectRow> = shares
+        .iter()
+        .map(|(name, path, part, cost_part)| ProjectRow { name: (*name).to_owned(), path: (*path).to_owned(), tokens: (total as f64 * part) as u64, cost: Some(cost * cost_part) })
+        .collect();
+    let (rest, last) = rows.split_at_mut(shares.len() - 1);
+    last[0].tokens = total - rest.iter().map(|row| row.tokens).sum::<u64>();
+    last[0].cost = Some(cost - rest.iter().filter_map(|row| row.cost).sum::<f64>());
+    rows
 }

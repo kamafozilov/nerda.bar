@@ -113,6 +113,31 @@ pub fn key() -> Option<String> {
         .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|key| !key.trim().is_empty()))
 }
 
+/// Saves `key` as the Keychain item [`key`] reads, replacing one there. The `security` tool
+/// reads the command from its input rather than its arguments, so the key never shows in a
+/// process list, and the item it makes is one it can read back without asking.
+pub fn save_key(key: &str) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_graphic() && c != '"' && c != '\\') {
+        return Err("That doesn't look like a DeepSeek key.".to_owned());
+    }
+    let mut child = Command::new("/usr/bin/security")
+        .arg("-i")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Couldn't open the Keychain: {e}."))?;
+    let line = format!("add-generic-password -U -s \"{KEYCHAIN_SERVICE}\" -a \"{KEYCHAIN_ACCOUNT}\" -w \"{key}\"\n");
+    if let Some(mut input) = child.stdin.take() {
+        use std::io::Write;
+        input.write_all(line.as_bytes()).map_err(|e| format!("Couldn't reach the Keychain: {e}."))?;
+    }
+    let output = child.wait_with_output().map_err(|e| format!("Couldn't reach the Keychain: {e}."))?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() && said.trim().is_empty() { Ok(()) } else { Err("The Keychain didn't save the key.".to_owned()) }
+}
+
 pub fn fetch(agent: &ureq::Agent) -> Result<Balance, Problem> {
     let key = key().ok_or(Problem::SignedOut)?;
     let now = time::unix_now();

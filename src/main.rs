@@ -12,6 +12,7 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Nerda Bar is a macOS app.");
 
+mod add_view;
 mod agents;
 mod agents_view;
 mod alloc;
@@ -181,6 +182,23 @@ fn main() {
             ("signed-out", |s| {
                 s.claude.snapshot = None;
                 s.claude.problem = Some(Problem::SignedOut);
+            }),
+            ("no-agents", |s| {
+                s.claude.snapshot = None;
+                s.claude.problem = Some(Problem::SignedOut);
+                s.codex.snapshot = None;
+                s.codex.problem = Some(Problem::SignedOut);
+                s.deepseek.ledger = None;
+                s.deepseek.problem = Some(Problem::SignedOut);
+            }),
+            ("add-agent", |s| {
+                s.deepseek.ledger = None;
+                s.deepseek.problem = Some(Problem::SignedOut);
+                s.adding = true;
+            }),
+            ("deepseek-offline", |s| {
+                s.tab = Tab::DeepSeek;
+                s.deepseek.problem = Some(Problem::Offline("Couldn't reach DeepSeek.".to_owned()));
             }),
         ],
         ..AppSpec::new("Nerda Bar", (ui::WINDOW_W, ui::WINDOW_H), || unreachable!(), view::view)

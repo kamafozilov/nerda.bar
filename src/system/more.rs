@@ -257,20 +257,20 @@ pub fn demo(now: f64, view: &mut super::SystemView) {
         read: 48e6,
         write: 12e6,
     });
-    let interface = |bsd: &str, name: &str, kind: net::Kind, address: Option<&str>| Interface {
+    let interface = |bsd: &str, name: &str, kind: net::Kind, address: Option<&str>, (received, sent): (u64, u64)| Interface {
         bsd: bsd.to_owned(),
         name: name.to_owned(),
         kind,
         address: address.map(str::to_owned),
         active: address.is_some(),
-        received: 0,
-        sent: 0,
+        received,
+        sent,
     };
     view.net = Some(NetView {
         interfaces: vec![
-            interface("en0", "Wi-Fi", net::Kind::WiFi, Some("192.168.1.24")),
-            interface("en5", "Thunderbolt Ethernet", net::Kind::Ethernet, None),
-            interface("utun3", "VPN", net::Kind::Vpn, Some("10.8.0.2")),
+            interface("en0", "Wi-Fi", net::Kind::WiFi, Some("192.168.1.24"), (4_600_000_000, 590_000_000)),
+            interface("en5", "Thunderbolt Ethernet", net::Kind::Ethernet, None, (0, 0)),
+            interface("utun3", "VPN", net::Kind::Vpn, Some("10.8.0.2"), (180_000_000, 26_000_000)),
         ],
         primary: Some("en0".to_owned()),
         down: 2.4e6,

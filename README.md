@@ -30,7 +30,7 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on Claude's tab: a ring per limit with its reset time, Fable's weekly limit picked, extra usage, the picked limit's chart across the week beside an even pace and a projection, then tokens, cost, a chart split by model and a row per model for the last 7 days, with a rail of providers and of this Mac's measures on the left"></td>
+    <td width="50%"><img src="docs/images/panel-dark.png" alt="The panel in dark mode on the Agents tab, Claude picked: a top bar of tab icons, Claude, Codex and DeepSeek tabs with +, then on the left a ring per limit with its reset time, extra usage and the picked limit's chart across the week beside an even pace and a projection, and on the right tokens, cost, a chart split by model, a row per model and the projects that spent the most in the last 7 days"></td>
     <td width="50%"><img src="docs/images/panel-light.png" alt="The same panel in light mode"></td>
   </tr>
 </table>
@@ -58,7 +58,7 @@ Nerda Bar shows how much of your AI plans is left and what you used (Claude, Cod
 
 ## What it shows
 
-The panel has a rail down its left side: the providers by their marks (Claude, Codex, DeepSeek), then this Mac's measures (CPU, RAM, Disk, Net, Batt, GPU), and at its foot Settings and Quit. A click on a menu bar item opens the panel on its own tab.
+The panel has one size on every tab. Its top bar holds the tabs as icons: **Agents**, then this Mac's measures (CPU, Memory, Disk, Network, Battery, GPU), and Settings at the end; each icon's tooltip names it and its shortcut. Under it, a context bar says what the tab is about: on Agents, a tab per signed-in agent (Claude, Codex, DeepSeek) and **+** to add one. A tab's body has two columns: charts take the height their column leaves, and lists show as many rows as fit. A click on a menu bar item opens the panel on its own tab.
 
 ### Claude and Codex
 
@@ -72,7 +72,9 @@ The panel has a rail down its left side: the providers by their marks (Claude, C
 - **Limits**: a ring per limit (session or 5-hour, weekly, per-model weekly) filled to what is left, with a tick where an even pace would be, the time to its reset, and extra usage with its cap. Hover a ring for how far ahead or behind an even pace you are; click it to chart it.
 - **The chart**: the picked limit's window from 100% down to now, an even pace to compare against, where the pace so far leads, and a pill saying whether it lasts until the reset. Under the pointer, what was left then and what was used that day.
 - **Usage** for today by the hour, and for 7 and 30 days by the day: tokens, what they would have cost at API prices, a chart split by model, and a row per model. The bar under the pointer replaces the totals; hovering the totals splits them into input, output and cache.
-- **Problems** show as a banner over the numbers they make stale (offline, login expired, updates paused, a failed request), and the numbers fade until they are current again. Without a login, the tab says what to run, with a Copy button.
+- **Projects**: the folders that spent the most in the same period, with their tokens and cost. Claude's are the folder each session started in, Codex's the folder it ran in.
+- **Problems** show as a strip under the context bar (offline, login expired, updates paused, a failed request) with Try again; the limits under it say what time they are from.
+- **No agent yet**: the tab lists each provider and how to connect it. **+** adds one: Claude and Codex by signing in to their own tools, DeepSeek by pasting its API key, which is saved to the Keychain.
 
 Claude's limit resets ("Reset for free") can only be used in Claude's own apps, so the panel doesn't offer them.
 
@@ -82,7 +84,7 @@ Claude's limit resets ("Reset for free") can only be used in Claude's own apps, 
 
 DeepSeek reports only the account's balance. The tab shows it split into topped-up and granted credit, how long it lasts at last week's spend, and the spend per day, read from how the balance fell between refreshes; a rise is a top-up.
 
-The key is read from the Keychain. Add it once in a terminal (it asks for the key, so it never lands in your shell history):
+The key is kept in the Keychain. Add it with **+** on the Agents tab: paste it and press Add, and Nerda Bar saves it to the Keychain item "Nerda Bar" without it ever showing on a command line. In a terminal it is the same item (the command asks for the key, so it never lands in your shell history):
 
 ```sh
 security add-generic-password -s "Nerda Bar" -a deepseek -w
@@ -97,7 +99,7 @@ security add-generic-password -s "Nerda Bar" -a deepseek -w
 <table>
   <tr>
     <td width="33%"><img src="docs/images/cpu.png" alt="The CPU tab"><br><b>CPU</b>: the share in use split into apps and the system, the load average, its history, the apps using it and each core.</td>
-    <td width="33%"><img src="docs/images/memory.png" alt="The RAM tab"><br><b>RAM</b>: used memory by kind (app, wired, compressed, cached, free), pressure, the apps holding it, its history and swap.</td>
+    <td width="33%"><img src="docs/images/memory.png" alt="The Memory tab"><br><b>Memory</b>: used memory by kind (app, wired, compressed, cached, free), pressure, the apps holding it, its history and swap.</td>
     <td width="33%"><img src="docs/images/disk.png" alt="The Disk tab"><br><b>Disk</b>: used, purgeable and free space, read and write rates, the apps that read and wrote the most in the last hour, and other volumes with Eject.</td>
   </tr>
   <tr>
@@ -119,10 +121,12 @@ Each provider has an item with its mark. Claude's shows the limit the settings p
 
 | Key | Action |
 | --- | --- |
-| ⌘1 … ⌘9 | The rail's tabs in order |
+| ⌘1 | Agents |
+| ⌘2 … ⌘7 | This Mac's tabs, in the top bar's order |
+| ⌘⇧[ ⌘⇧] | The previous and next agent |
 | ⌘R | Refresh the shown provider now |
 | ⌘, | Settings |
-| esc | Back from Settings, else close the panel |
+| esc | Close the Add an agent popover, else back from Settings, else close the panel |
 | ⌘Q | Quit |
 
 ## Where the numbers come from
@@ -196,9 +200,9 @@ target/release/nerda-bar --list-scenes
 - `src/main.rs`: wiring, window options and the headless scenes
 - `src/ui.rs`: state, tabs, keys, open and close
 - `src/agents.rs`: each provider's state, the worker's events, the providers' menu bar items, the reset flow
-- `src/view.rs`: the panel and its rail; `src/look.rs`: colours, type and shared pieces
-- `src/agents_view.rs`, `src/burn_view.rs`, `src/resets_view.rs`: Claude's and Codex's tabs, the limit chart, free resets
-- `src/deepseek_view.rs`: DeepSeek's tab
+- `src/view.rs`: the panel, its top bar and the screen of each tab; `src/look.rs`: colours, type, the panel's geometry and shared pieces; `DESIGN.md`: the design system they follow
+- `src/agents_view.rs`, `src/burn_view.rs`, `src/resets_view.rs`: the Agents tab for Claude and Codex, the limit chart, free resets
+- `src/deepseek_view.rs`: DeepSeek's tab; `src/add_view.rs`: no agent yet, and the Add an agent popover
 - `src/system_view.rs`, `src/mac_view.rs`: this Mac's tabs
 - `src/settings_view.rs`: the settings
 - `src/status_item.rs`: the menu bar items, their glyphs and their menu (AppKit)

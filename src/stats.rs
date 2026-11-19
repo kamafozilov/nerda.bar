@@ -1,5 +1,6 @@
 //! Token statistics from Claude Code's own session logs: every assistant message under
-//! `<config>/projects/**/*.jsonl` of the last 30 days, counted once, by local hour and model.
+//! `<config>/projects/**/*.jsonl` of the last 30 days, counted once, by local hour, model and
+//! the project folder its session was started in.
 //!
 //! Claude Code writes a message once per content block and copies earlier messages into a
 //! resumed session's file, so the same message id shows up many times. Each id counts once,
@@ -45,6 +46,7 @@ struct CellKey {
     model: u16,
     /// The request's prompt size in [`CONTEXT_STEP`]s.
     context: u8,
+    project: u16,
 }
 
 /// One message as counted: which cell it went to and what it added there.
@@ -61,6 +63,9 @@ struct Line<'a> {
     timestamp: Option<Cow<'a, str>>,
     #[serde(borrow)]
     message: Option<Message<'a>>,
+    /// The session's working directory when the message was sent.
+    #[serde(borrow)]
+    cwd: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +115,11 @@ pub struct Scanner {
     cells: Vec<(CellKey, Tokens)>,
     cell_index: HashMap<CellKey, u32>,
     models: Vec<String>,
+    /// Project folders by index, and the index of each.
+    projects: Vec<String>,
+    project_index: HashMap<String, u16>,
+    /// The home folder, which project paths show as "~".
+    home: String,
     /// Local day and hour by quarter hour of Unix time, so the C library is asked once each.
     local_memo: HashMap<i64, (i32, u8)>,
     buffer: Vec<u8>,
@@ -125,6 +135,9 @@ impl Scanner {
             cells: Vec::new(),
             cell_index: HashMap::new(),
             models: Vec::new(),
+            projects: Vec::new(),
+            project_index: HashMap::new(),
+            home: std::env::var("HOME").unwrap_or_default(),
             local_memo: HashMap::new(),
             buffer: Vec::new(),
         }
@@ -165,10 +178,12 @@ impl Scanner {
         // A last line still being written waits for the next scan.
         let complete = memchr::memrchr(b'\n', &buffer).map_or(0, |at| at + 1);
         let mut changed = false;
+        // The session's log folder, named after the folder it was started in.
+        let folder = self.roots.iter().find_map(|root| path.strip_prefix(root).ok()).and_then(|rest| rest.components().next()).map(|part| part.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
         let assistant = memmem::Finder::new(br#""type":"assistant""#);
         for line in buffer[..complete].split(|b| *b == b'\n') {
             if assistant.find(line).is_some() {
-                changed |= self.count_line(line, cutoff);
+                changed |= self.count_line(line, cutoff, &folder);
             }
         }
         self.cursors.insert(path.to_owned(), from + complete as u64);
@@ -176,7 +191,8 @@ impl Scanner {
         Some(changed)
     }
 
-    fn count_line(&mut self, line: &[u8], cutoff: i64) -> bool {
+    /// Counts one line of the log folder `folder`.
+    fn count_line(&mut self, line: &[u8], cutoff: i64, folder: &str) -> bool {
         let Ok(line) = serde_json::from_slice::<Line>(line) else { return false };
         let (Some(message), Some(timestamp)) = (line.message, line.timestamp) else { return false };
         let (Some(usage), Some(model)) = (message.usage, message.model) else { return false };
@@ -195,7 +211,8 @@ impl Scanner {
             (local.day, local.hour)
         });
         let prompt = tokens[INPUT] as u64 + tokens[CACHE_WRITE_5M] as u64 + tokens[CACHE_WRITE_1H] as u64 + tokens[CACHE_READ] as u64;
-        let key = CellKey { day, hour, model: self.model_index(&model), context: (prompt / CONTEXT_STEP).min(u8::MAX as u64) as u8 };
+        let project = self.project_index(session_folder(folder, line.cwd.as_deref().unwrap_or("")));
+        let key = CellKey { day, hour, model: self.model_index(&model), context: (prompt / CONTEXT_STEP).min(u8::MAX as u64) as u8, project };
         let cell = self.cell(key);
 
         let Some(id) = message.id.filter(|id| !id.is_empty()) else {
@@ -215,11 +232,11 @@ impl Scanner {
         true
     }
 
-    /// Counts `tokens` of `model` at `at`, for logs read elsewhere (Codex's), which carry no
-    /// message ids to tell copies apart.
-    pub fn record(&mut self, at: i64, model: &str, tokens: [u32; 5]) {
+    /// Counts `tokens` of `model`, sent from the folder `cwd`, at `at`, for logs read elsewhere
+    /// (Codex's), which carry no message ids to tell copies apart.
+    pub fn record(&mut self, at: i64, model: &str, cwd: &str, tokens: [u32; 5]) {
         let local = time::local(at);
-        let key = CellKey { day: local.day, hour: local.hour, model: self.model_index(model), context: 0 };
+        let key = CellKey { day: local.day, hour: local.hour, model: self.model_index(model), context: 0, project: self.project_index(cwd) };
         let cell = self.cell(key);
         self.add(cell, tokens);
     }
@@ -230,6 +247,18 @@ impl Scanner {
         }
         self.models.push(model.to_owned());
         (self.models.len() - 1) as u16
+    }
+
+    /// The index of the project a message sent from `cwd` belongs to.
+    fn project_index(&mut self, cwd: &str) -> u16 {
+        let project = project_of(cwd);
+        if let Some(at) = self.project_index.get(project) {
+            return *at;
+        }
+        let at = self.projects.len() as u16;
+        self.projects.push(project.to_owned());
+        self.project_index.insert(project.to_owned(), at);
+        at
     }
 
     fn cell(&mut self, key: CellKey) -> u32 {
@@ -315,9 +344,10 @@ impl Scanner {
                 Bar { label, tokens: 0, cost: 0.0, parts: [0; 4] }
             })
             .collect();
-        let mut view = RangeView { tokens: [0; 5], cost: 0.0, unpriced: false, bars: Vec::new(), axis: Vec::new(), axis_per_bar: false, models: Vec::new() };
+        let mut view = RangeView { tokens: [0; 5], cost: 0.0, unpriced: false, bars: Vec::new(), axis: Vec::new(), axis_per_bar: false, models: Vec::new(), projects: Vec::new() };
         let mut by_model: HashMap<String, ModelRow> = HashMap::new();
         let mut by_bar: HashMap<(usize, &str), u64> = HashMap::new();
+        let mut by_project: HashMap<u16, (u64, Option<f64>)> = HashMap::new();
         for (key, tokens) in &self.cells {
             let total: u64 = tokens.iter().sum();
             if key.day < first || key.day > today || total == 0 {
@@ -339,9 +369,25 @@ impl Scanner {
             let row = by_model.entry(name.to_owned()).or_insert_with(|| ModelRow { name: name.to_owned(), tokens: 0, cost: Some(0.0) });
             row.tokens += total;
             row.cost = row.cost.zip(cost).map(|(sum, cost)| sum + cost);
+            let project = by_project.entry(key.project).or_default();
+            project.0 += total;
+            if let Some(cost) = cost {
+                project.1 = Some(project.1.unwrap_or(0.0) + cost);
+            }
         }
         view.models = by_model.into_values().collect();
         view.models.sort_by(|a, b| b.cost.unwrap_or(0.0).total_cmp(&a.cost.unwrap_or(0.0)).then(b.tokens.cmp(&a.tokens)).then_with(|| a.name.cmp(&b.name)));
+        view.projects = by_project
+            .into_iter()
+            .map(|(project, (tokens, cost))| {
+                let (name, path) = project_label(&self.projects[project as usize], &self.home);
+                ProjectRow { name, path, tokens, cost }
+            })
+            .collect();
+        view.projects.sort_by(|a, b| {
+            let cost = |row: &ProjectRow| row.cost.unwrap_or(-1.0);
+            cost(b).total_cmp(&cost(a)).then(b.tokens.cmp(&a.tokens)).then_with(|| a.name.cmp(&b.name)).then_with(|| a.path.cmp(&b.path))
+        });
         // Each bar split as the list under the chart is: its first three models, then the rest.
         for ((at, name), tokens) in by_bar {
             let part = view.models.iter().position(|row| row.name == name).unwrap_or(SERIES).min(SERIES);
@@ -376,6 +422,38 @@ pub fn display_name(model: &str) -> &str {
     match model.rsplit_once('-') {
         Some((name, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => name,
         _ => model,
+    }
+}
+
+/// The folder a Claude Code session was started in, when its message was sent from `cwd`, a
+/// folder the session may have moved into since: of `cwd` and the folders it is in, the one
+/// the session's log folder `log_folder` is named after, every character but a letter or
+/// digit written "-". `cwd` itself when none is, as when the session moved out.
+fn session_folder<'a>(log_folder: &str, cwd: &'a str) -> &'a str {
+    let named = |path: &&str| path.len() == log_folder.len() && path.bytes().zip(log_folder.bytes()).all(|(p, l)| if p.is_ascii_alphanumeric() { p == l } else { l == b'-' });
+    std::iter::successors(Some(cwd), |path| path.rsplit_once('/').map(|(parent, _)| parent).filter(|parent| !parent.is_empty())).find(named).unwrap_or(cwd)
+}
+
+/// The project a message sent from the folder `cwd` belongs to: the folder itself, or the
+/// repository of a worktree Claude Code made under `<repo>/.claude/worktrees/`.
+fn project_of(cwd: &str) -> &str {
+    cwd.find("/.claude/worktrees/").map_or(cwd, |at| &cwd[..at])
+}
+
+/// A project folder as the list shows it: its last component, and the folder it is in with
+/// `home` written "~". "/Users/me/Developer/nerda.bar" is "nerda.bar" in "~/Developer".
+fn project_label(path: &str, home: &str) -> (String, String) {
+    if path.is_empty() {
+        return ("Unknown".to_owned(), String::new());
+    }
+    let short = match path.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => path.to_owned(),
+    };
+    let short = short.trim_end_matches('/');
+    match short.rsplit_once('/') {
+        Some((parent, name)) => (name.to_owned(), if parent.is_empty() { "/".to_owned() } else { parent.to_owned() }),
+        None => (if short.is_empty() { "/" } else { short }.to_owned(), String::new()),
     }
 }
 
@@ -422,6 +500,19 @@ pub struct ModelRow {
     pub cost: Option<f64>,
 }
 
+/// The tokens sent from one project folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRow {
+    /// The folder's last component: "nerda.bar".
+    pub name: String,
+    /// The folder it is in, the home folder written "~": "~/Developer".
+    pub path: String,
+    pub tokens: u64,
+    /// What its models without a known price aside cost, so the rows add up to the range's
+    /// `cost`; `None` when none of its models has a known price.
+    pub cost: Option<f64>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeView {
     pub tokens: Tokens,
@@ -435,6 +526,9 @@ pub struct RangeView {
     pub axis_per_bar: bool,
     /// Most expensive first.
     pub models: Vec<ModelRow>,
+    /// Every project the range's tokens were sent from, most expensive first, those without
+    /// a price last, then by tokens.
+    pub projects: Vec<ProjectRow>,
 }
 
 impl RangeView {
@@ -476,8 +570,14 @@ mod tests {
     use crate::prices::Rate;
 
     fn line(id: &str, model: &str, at: &str, input: u64, output: u64, write: u64, read: u64) -> String {
+        line_from("/Users/me/Developer/demo", id, model, at, input, output, write, read)
+    }
+
+    /// A message sent from the folder `cwd`.
+    #[allow(clippy::too_many_arguments)]
+    fn line_from(cwd: &str, id: &str, model: &str, at: &str, input: u64, output: u64, write: u64, read: u64) -> String {
         format!(
-            r#"{{"parentUuid":"p","isSidechain":false,"message":{{"model":"{model}","id":"{id}","content":[{{"type":"text","text":"a \"quoted\" reply"}}],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"output_tokens":{output},"cache_creation":{{"ephemeral_1h_input_tokens":{write},"ephemeral_5m_input_tokens":0}}}}}},"requestId":"r","type":"assistant","timestamp":"{at}"}}"#
+            r#"{{"parentUuid":"p","isSidechain":false,"cwd":"{cwd}","message":{{"model":"{model}","id":"{id}","content":[{{"type":"text","text":"a \"quoted\" reply"}}],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"output_tokens":{output},"cache_creation":{{"ephemeral_1h_input_tokens":{write},"ephemeral_5m_input_tokens":0}}}}}},"requestId":"r","type":"assistant","timestamp":"{at}"}}"#
         )
     }
 
@@ -592,5 +692,67 @@ mod tests {
     fn release_dates_come_off_model_names() {
         assert_eq!(display_name("claude-opus-4-5-20251101"), "claude-opus-4-5");
         assert_eq!(display_name("claude-fable-5-2"), "claude-fable-5-2");
+    }
+
+    #[test]
+    fn messages_split_into_the_projects_they_were_sent_from() {
+        let lines = [
+            line_from("/Users/me/Developer/nerda.bar", "msg_1", "claude-opus-4-5", "2026-11-12T10:00:00Z", 100, 50, 0, 1000),
+            line_from("/Users/me/dotfiles", "msg_2", "claude-opus-4-5", "2026-11-12T10:10:00Z", 10, 5, 0, 0),
+            // A worktree Claude Code made counts to its repository.
+            line_from("/Users/me/Developer/nerda.bar/.claude/worktrees/agent-a1b2", "msg_3", "claude-opus-4-5", "2026-11-12T10:20:00Z", 20, 30, 0, 0),
+            line_from("/Users/me/Developer/nerda.bar", "msg_4", "mystery-model", "2026-11-12T10:30:00Z", 7, 0, 0, 0),
+            line_from("/tmp/scratch", "msg_5", "mystery-model", "2026-11-12T10:40:00Z", 3, 0, 0, 0),
+        ];
+        let (mut scanner, dir) = scanner_over("projects", &lines);
+        scanner.home = "/Users/me".to_owned();
+        scanner.scan(NOW);
+        let month = &scanner.view(&prices(), NOW).ranges[2];
+        let rows: Vec<(&str, &str, u64)> = month.projects.iter().map(|row| (row.name.as_str(), row.path.as_str(), row.tokens)).collect();
+        assert_eq!(rows, [("nerda.bar", "~/Developer", 1207), ("dotfiles", "~", 15), ("scratch", "/tmp", 3)]);
+        assert_eq!(month.projects.iter().map(|row| row.tokens).sum::<u64>(), month.total());
+        let cost: f64 = month.projects.iter().filter_map(|row| row.cost).sum();
+        assert!((cost - month.cost).abs() < 1e-12, "{cost} vs {}", month.cost);
+        assert!((month.projects[1].cost.unwrap() - (10.0 * 5.0 + 5.0 * 25.0) / 1e6).abs() < 1e-12);
+        assert_eq!(month.projects[2].cost, None, "nothing from /tmp has a price");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_message_seen_twice_counts_once_in_one_project() {
+        let lines = [
+            line_from("/work/first", "msg_1", "claude-opus-4-5", "2026-11-12T10:00:00Z", 10, 5, 0, 0),
+            // Copied into a session resumed elsewhere, finished there.
+            line_from("/work/second", "msg_1", "claude-opus-4-5", "2026-11-12T10:00:01Z", 10, 40, 0, 0),
+            line_from("/work/first", "msg_1", "claude-opus-4-5", "2026-11-12T10:00:02Z", 10, 40, 0, 0),
+        ];
+        let (mut scanner, dir) = scanner_over("project-dedup", &lines);
+        scanner.scan(NOW);
+        let month = &scanner.view(&prices(), NOW).ranges[2];
+        assert_eq!(month.total(), 50);
+        assert_eq!(month.projects.len(), 1);
+        assert_eq!((month.projects[0].name.as_str(), month.projects[0].tokens), ("second", 50));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_paths_show_home_as_a_tilde() {
+        let label = |path: &str| project_label(path, "/Users/me");
+        assert_eq!(label("/Users/me/Developer/nerda.bar"), ("nerda.bar".to_owned(), "~/Developer".to_owned()));
+        assert_eq!(label("/Users/me/dotfiles"), ("dotfiles".to_owned(), "~".to_owned()));
+        assert_eq!(label("/Users/me"), ("~".to_owned(), String::new()));
+        assert_eq!(label("/Users/meadow/notes"), ("notes".to_owned(), "/Users/meadow".to_owned()));
+        assert_eq!(label("/srv/app/"), ("app".to_owned(), "/srv".to_owned()));
+        assert_eq!(label("/tmp"), ("tmp".to_owned(), "/".to_owned()));
+    }
+
+    #[test]
+    fn a_session_keeps_the_folder_it_started_in() {
+        let folder = "-Users-me-Developer-nerda-bar";
+        assert_eq!(session_folder(folder, "/Users/me/Developer/nerda.bar"), "/Users/me/Developer/nerda.bar");
+        assert_eq!(session_folder(folder, "/Users/me/Developer/nerda.bar/src/views"), "/Users/me/Developer/nerda.bar");
+        assert_eq!(session_folder(folder, "/Users/me/dotfiles"), "/Users/me/dotfiles", "moved out of it");
+        assert_eq!(session_folder("-Users-me--t3-scratch", "/Users/me/.t3/scratch/a"), "/Users/me/.t3/scratch");
+        assert_eq!(session_folder("demo", "/"), "/");
     }
 }

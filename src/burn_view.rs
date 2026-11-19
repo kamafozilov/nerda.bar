@@ -9,19 +9,21 @@
 //! dashed and the projection dotted, each named in the legend under the chart. Only the area
 //! under the line is filled, fading to the baseline: the chart sits on the panel itself.
 
-use rune::{Color, El, LineCap, Shape, canvas, col, el, row, spacer, text};
+use rune::{Color, El, LineCap, Shape, canvas, col, el, row, text};
 
 use crate::agents_view::runway;
 use crate::burn::{self, Curve, Source};
-use crate::look::{INNER_W, Look, PAD_X, digits, font, pill};
+use crate::look::{self, GAP, INNER_W, Look, digits, font, pill};
 use crate::model::{self, Limit, Provider, Severity, Snapshot};
 use crate::time::{self, WEEKDAYS};
 use crate::ui::{self, Ui};
 
-const CHART_H: f32 = 80.0;
+/// The chart's name and reading over it.
+const TITLE_H: f32 = 32.0;
 /// Room under the baseline for a ring that sits on it.
 const BELOW: f32 = 5.0;
-const AXIS_H: f32 = 12.0;
+const AXIS_H: f32 = 14.0;
+const LEGEND_H: f32 = 14.0;
 const LINE: f32 = 2.0;
 /// The narrowest column that still gets its name under the chart.
 const LABEL_MIN_W: f32 = 22.0;
@@ -31,37 +33,40 @@ const THIN: f32 = 0.6;
 /// Steps of the area's fade from the line to the baseline.
 const FADE_STEPS: usize = 16;
 
-/// The chart of `limit`, the one picked, with its name and reading over it. A limit with no
-/// window under way says when one starts in the chart's place, so the panel keeps its height.
-pub fn section(s: &Ui, l: &Look, provider: Provider, snapshot: &Snapshot, limit: &Limit) -> El {
+/// The chart of `limit`, the one picked, with its name and reading over it, the section
+/// `height` tall: the chart takes what its title, axis and legend leave. A limit with no window
+/// under way says when one starts in the chart's place.
+pub fn section(s: &Ui, l: &Look, provider: Provider, snapshot: &Snapshot, limit: &Limit, height: f32) -> El {
     let a = s.agent(provider);
     let show_used = s.show_used(provider);
     let activity = a.stats.as_ref().map_or(&[][..], |stats| stats.activity.as_slice());
     let curve = burn::curve(limit, snapshot.fetched_at, a.history.readings(&limit.id), activity);
     let moment = curve.as_ref().and_then(|curve| s.trace.map(|at| curve.start + ((curve.end - curve.start) as f64 * at as f64) as i64));
     let any_scoped = snapshot.limits.iter().any(|l| l.scoped);
-    let body = col().key("limit-history").w_full().px(PAD_X).py(12.0).gap(8.0);
+    let inside = look::inside(height);
+    let body = look::next_section(l, "limit-history").h(height);
     let (name, scope) = model::names(limit, any_scoped);
-    let mut names = row().gap(4.0).center_y().child(text(name).font(font(12.5, 600.0)).color(l.text));
+    let mut names = row().gap(4.0).center_y().child(text(name).font(font(13.0, 600.0)).color(l.text));
     if let Some(scope) = scope {
-        names = names.child(text(scope).font(font(12.5, 400.0)).color(l.dim));
+        names = names.child(text(scope).font(font(13.0, 400.0)).color(l.dim));
     }
     let Some(curve) = curve else {
-        let empty = row().key("limit-chart-empty").w_full().h(CHART_H + BELOW + 8.0 + AXIS_H).center().child(text(crate::agents_view::reset_note(limit, s.now)).font(font(11.5, 400.0)).color(l.faint));
-        return body.child(row().key("limit-title").w_full().child(names)).child(empty);
+        let empty = row().key("limit-chart-empty").w_full().h((inside - TITLE_H - GAP).max(0.0)).center().child(text(crate::agents_view::reset_note(limit, s.now)).font(font(12.0, 400.0)).color(l.faint));
+        return body.child(row().key("limit-title").w_full().h(TITLE_H).child(names)).child(empty);
     };
     let severity = limit.severity();
     let color = l.fill(severity);
     let title = row()
         .key("limit-title")
         .w_full()
-        .h(30.0)
+        .h(TITLE_H)
         .gap(8.0)
-        .center_y()
-        .child(col().grow(1.0).min_w(0.0).gap(1.0).child(names).child(text(detail(&curve, moment)).key("limit-readout").font(digits(11.0, 400.0)).color(l.faint)))
+        .items_start()
+        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(names).child(text(detail(&curve, moment)).key("limit-readout").font(digits(11.0, 400.0)).color(l.faint)))
         .child(status(s, l, limit, &curve, moment, show_used));
+    let chart_h = (inside - TITLE_H - GAP - BELOW - 4.0 - AXIS_H - GAP - LEGEND_H).max(40.0);
     body.child(title)
-        .child(col().w_full().gap(4.0).child(chart(l, limit, &curve, severity, moment, show_used)).child(axis(l, &curve, moment, s.now)))
+        .child(col().w_full().gap(4.0).child(chart(l, limit, &curve, severity, moment, show_used, chart_h)).child(axis(l, &curve, moment, s.now)))
         .child(legend(l, &curve, color, severity))
 }
 
@@ -81,8 +86,8 @@ fn status(s: &Ui, l: &Look, limit: &Limit, curve: &Curve, moment: Option<i64>, s
         return col()
             .key("limit-value")
             .items_end()
-            .child(text(format!("{}{}% {word}", if estimated { "~" } else { "" }, shown.round() as i64)).font(digits(13.0, 700.0)).color(l.ink(model::severity(100.0 - used))))
-            .child(text(note).font(font(10.5, 400.0)).color(l.faint));
+            .child(text(format!("{}{}% {word}", if estimated { "~" } else { "" }, shown.round() as i64)).font(digits(13.0, 600.0)).color(l.ink(model::severity(100.0 - used))))
+            .child(text(note).font(font(11.0, 400.0)).color(l.faint));
     }
     // The pill names the moment; the row over the chart counts down to it.
     let when = |runway: i64| {
@@ -124,9 +129,9 @@ fn detail(curve: &Curve, moment: Option<i64>) -> String {
     }
 }
 
-fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Option<i64>, show_used: bool) -> El {
+fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Option<i64>, show_used: bool, h: f32) -> El {
     let color = l.fill(severity);
-    let (w, h) = (INNER_W, CHART_H);
+    let w = INNER_W;
     let (start, span) = (curve.start, (curve.end - curve.start) as f32);
     let x = |t: i64| ((t - start) as f32 / span * w).clamp(0.0, w);
     // A hair inside the top, so a line at 100% isn't cut in half.
@@ -220,7 +225,7 @@ fn chart(l: &Look, limit: &Limit, curve: &Curve, severity: Severity, moment: Opt
         let lx = (ex - label_w / 2.0).clamp(0.0, w - label_w);
         let ly = if curve.runs_out { ey - 30.0 } else { ey - 34.0 }.max(0.0);
         let anchor = if ex > w - label_w / 2.0 { row().justify_end() } else { row().center() };
-        area = area.child(anchor.absolute(lx, ly).w(label_w).child(text(words).key("limit-label").font(digits(10.0, 600.0)).color(color)));
+        area = area.child(anchor.absolute(lx, ly).w(label_w).child(text(words).key("limit-label").font(digits(11.0, 600.0)).color(color)));
     }
     area
 }
@@ -301,7 +306,7 @@ fn axis(l: &Look, curve: &Curve, moment: Option<i64>, now: i64) -> El {
         let name = if daily { WEEKDAYS[time::local(from).weekday as usize].to_owned() } else { format!("{:02}:00", time::local(from).hour) };
         if width >= if daily { LABEL_MIN_W } else { HOUR_LABEL_MIN_W } {
             let on = strong == Some((from, to));
-            cell = cell.child(text(name).font(digits(10.0, if on { 700.0 } else { 400.0 })).color(if on { l.text } else { l.faint }));
+            cell = cell.child(text(name).font(digits(11.0, if on { 600.0 } else { 400.0 })).color(if on { l.text } else { l.faint }));
         }
         axis = axis.child(cell);
     }
@@ -310,29 +315,20 @@ fn axis(l: &Look, curve: &Curve, moment: Option<i64>, now: i64) -> El {
 
 /// What each line is: colour and dashes never name a series alone.
 fn legend(l: &Look, curve: &Curve, color: Color, severity: Severity) -> El {
-    let (w, mid) = (13.0, 1.5);
+    let (w, mid) = (12.0, 1.5);
     let item = |key: &'static str, swatch: Shape, name: &'static str| {
-        row().key(key).gap(5.0).center_y().child(canvas(swatch).size(w, 3.0)).child(text(name).font(font(10.5, 400.0)).color(l.dim))
+        row().key(key).gap(6.0).center_y().child(canvas(swatch).size(w, 3.0)).child(text(name).font(font(11.0, 400.0)).color(l.dim))
     };
-    let mut items = Vec::new();
+    let mut legend = row().key("limit-legend").w_full().h(LEGEND_H).gap(16.0).center_y();
     if curve.points.iter().skip(1).any(|p| p.source == Source::Recorded) {
-        items.push(item("legend-recorded", Shape::new().line([1.0, mid], [11.0, mid], 2.0, LineCap::Round, color), "Recorded"));
+        legend = legend.child(item("legend-recorded", Shape::new().line([1.0, mid], [11.0, mid], 2.0, LineCap::Round, color), "Recorded"));
     }
     if curve.estimated() {
-        items.push(item("legend-estimated", Shape::new().line([1.0, mid], [11.0, mid], 2.0, LineCap::Round, l.estimated(severity)), "Estimated"));
+        legend = legend.child(item("legend-estimated", Shape::new().line([1.0, mid], [11.0, mid], 2.0, LineCap::Round, l.estimated(severity)), "Estimated"));
     }
-    items.push(item("legend-pace", dashed(Shape::new(), [0.0, mid], [w, mid], 3.0, 2.0, 2.0, LineCap::Butt, l.faint), "Even pace"));
+    legend = legend.child(item("legend-pace", dashed(Shape::new(), [0.0, mid], [w, mid], 3.0, 2.0, 2.0, LineCap::Butt, l.faint), "Even pace"));
     if curve.projection.is_some() {
-        items.push(item("legend-projection", dashed(Shape::new(), [1.0, mid], [w, mid], 0.01, 4.0, 2.0, LineCap::Round, color), "Projection"));
-    }
-    // Spread across the width, as the design's legend is.
-    let mut legend = row().key("limit-legend").w_full().center_y();
-    let count = items.len();
-    for (at, item) in items.into_iter().enumerate() {
-        legend = legend.child(item);
-        if at + 1 < count {
-            legend = legend.child(spacer());
-        }
+        legend = legend.child(item("legend-projection", dashed(Shape::new(), [1.0, mid], [w, mid], 0.01, 4.0, 2.0, LineCap::Round, color), "Projection"));
     }
     legend
 }

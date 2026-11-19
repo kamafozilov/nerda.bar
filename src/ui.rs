@@ -6,28 +6,25 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rune::{AppHandle, DisplayTarget, Image, ImageCache, Key, KeyEvent, OverlayPlacement, SystemMaterial, Tx};
+use rune::{AppHandle, DisplayTarget, Image, ImageCache, Key, KeyEvent, OverlayPlacement, SystemMaterial, TextEdit, Tx};
 
 use crate::agents::{Agent, DeepSeek, ResetFlow};
 use crate::config::{self, Config, MenuStyle, Module};
-use crate::model::{self, Provider, Severity, Snapshot};
+use crate::look::{PANEL_H, PANEL_W};
+use crate::model::{self, Problem, Provider, Severity, Snapshot};
 use crate::status_item;
 use crate::system::{Pressure, Rate, Sampler, SystemView};
 use crate::time;
 use crate::worker::{Command, Event, Worker};
 
-/// The tab's own column, and the rail of tabs beside it when there is more than one.
-pub const CONTENT_W: f32 = 344.0;
-pub const RAIL_W: f32 = 56.0;
-pub const PANEL_W: f32 = RAIL_W + CONTENT_W;
 /// Room beside and under the panel for its shadow.
 pub const SHADOW_ROOM: f32 = 28.0;
 /// Between the menu bar and the panel. The window starts at the menu bar's bottom edge, which
 /// macOS keeps windows below, so this is all the room there is above the panel.
 pub const GAP: f32 = 5.0;
 pub const WINDOW_W: f32 = PANEL_W + 2.0 * SHADOW_ROOM;
-/// Taller than the panel ever is; the panel takes the height of its content.
-pub const WINDOW_H: f32 = 920.0;
+/// The panel has one size on every tab, so the window is the panel and its shadow's room.
+pub const WINDOW_H: f32 = PANEL_H + GAP + SHADOW_ROOM;
 
 /// A click on the menu bar item first takes focus from the open panel, which closes it, and
 /// then arrives as a click. Within this long of that close, the click is the same gesture.
@@ -131,7 +128,15 @@ impl Tab {
         }
     }
 
-    /// The rail's short name for one of this Mac's tabs.
+    /// The top bar's icon for the tab: the agents share one.
+    pub fn icon(self) -> &'static rune::Icon {
+        match self {
+            Tab::Claude | Tab::Codex | Tab::DeepSeek => &crate::icons::SPARKLES,
+            tab => crate::system_view::glyph(tab),
+        }
+    }
+
+    /// The short name a menu bar item's text tag uses.
     pub fn short(self) -> &'static str {
         match self {
             Tab::Claude => "Claude",
@@ -212,6 +217,14 @@ pub struct Ui {
     pub hovered: Option<usize>,
     pub page: Page,
     pub tab: Tab,
+    /// The agent the Agents tab last showed: where the top bar's Agents tile goes back to.
+    pub agent_tab: Tab,
+    /// The Add an agent popover is open.
+    pub adding: bool,
+    /// The DeepSeek API key being typed in the Add an agent popover.
+    pub deepseek_key: TextEdit,
+    /// Why the last key couldn't be saved to the Keychain.
+    pub key_error: Option<String>,
     pub sampler: Option<Sampler>,
     /// The last reading of this Mac's measures, and their history.
     pub system: Option<Arc<SystemView>>,
@@ -259,6 +272,10 @@ impl Ui {
             hovered: None,
             page: Page::Tab,
             tab: Tab::Claude,
+            agent_tab: Tab::Claude,
+            adding: false,
+            deepseek_key: TextEdit::new("").secure(),
+            key_error: None,
             sampler,
             system: None,
             tier: 1,
@@ -322,13 +339,44 @@ impl Ui {
         }
     }
 
-    /// The panel's tabs, in the rail's order. A Mac without a battery has no battery tab.
-    pub fn tabs(&self) -> Vec<Tab> {
+    /// The agents the Agents tab has a tab for: each provider that is signed in, or whose
+    /// login is still being read. Claude counts until it is known to be signed out; Codex and
+    /// DeepSeek once they answered, so a provider that was never set up never flashes in.
+    pub fn agents(&self) -> Vec<Tab> {
+        let known = |snapshot: bool, problem: Option<&Problem>| snapshot || problem.is_some_and(|p| !matches!(p, Problem::SignedOut));
+        let mut agents = Vec::new();
+        if !matches!(self.claude.problem, Some(Problem::SignedOut)) || self.claude.snapshot.is_some() {
+            agents.push(Tab::Claude);
+        }
+        if known(self.codex.snapshot.is_some(), self.codex.problem.as_ref()) {
+            agents.push(Tab::Codex);
+        }
+        if known(self.deepseek.ledger.is_some(), self.deepseek.problem.as_ref()) {
+            agents.push(Tab::DeepSeek);
+        }
+        agents
+    }
+
+    /// The agent the Agents tile opens: the one last shown, while it is still there.
+    pub fn current_agent(&self) -> Tab {
+        let agents = self.agents();
+        if agents.contains(&self.agent_tab) { self.agent_tab } else { agents.first().copied().unwrap_or(Tab::Claude) }
+    }
+
+    /// This Mac's tabs the top bar shows, in its order. A Mac without a battery has no battery
+    /// tab.
+    pub fn mac_tabs(&self) -> Vec<Tab> {
         let no_battery = self.system.as_ref().is_some_and(|view| view.battery.is_none());
-        [Tab::Claude, Tab::Codex, Tab::DeepSeek]
-            .into_iter()
-            .chain(Tab::SYSTEM.into_iter().filter(|&tab| self.module(tab).is_some_and(|m| m.tab) && !(tab == Tab::Battery && no_battery)))
-            .collect()
+        Tab::SYSTEM.into_iter().filter(|&tab| self.module(tab).is_some_and(|m| m.tab) && !(tab == Tab::Battery && no_battery)).collect()
+    }
+
+    /// The shortcut that shows `tab`: ⌘1 for the agents, ⌘2 on for this Mac's tabs in order.
+    pub fn shortcut(&self, tab: Tab) -> Option<String> {
+        if tab.provider().is_some() {
+            return Some("⌘1".to_owned());
+        }
+        let at = self.mac_tabs().iter().position(|&t| t == tab)?;
+        (at < 8).then(|| format!("⌘{}", at + 2))
     }
 
     /// How often this Mac's measures need reading for what shows them now.
@@ -426,7 +474,11 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     s.last_anchor = Some(anchor);
     s.now = time::unix_now();
     s.page = Page::Tab;
-    s.tab = if s.tabs().contains(&tab) { tab } else { Tab::Claude };
+    s.tab = shown_tab(s, tab);
+    if s.tab.provider().is_some() {
+        s.agent_tab = s.tab;
+    }
+    s.adding = false;
     s.hovered = None;
     s.point = None;
     s.trace = None;
@@ -527,16 +579,88 @@ pub fn apply_system(s: &mut Ui, view: Arc<SystemView>, tx: &mut Tx) -> bool {
     shown
 }
 
+/// The tab to show for `tab`: itself while the panel has it, else the Agents tab's agent.
+fn shown_tab(s: &Ui, tab: Tab) -> Tab {
+    let there = if tab.provider().is_some() { s.agents().contains(&tab) } else { s.mac_tabs().contains(&tab) };
+    if there { tab } else { s.current_agent() }
+}
+
 /// Shows `tab` in the panel.
 pub fn set_tab(s: &mut Ui, tab: Tab, tx: &mut Tx) {
     // A different tab, not a change to this one: nothing slides or fades across.
     tx.instant();
     s.tab = tab;
+    if tab.provider().is_some() {
+        s.agent_tab = tab;
+    }
     s.page = Page::Tab;
+    s.adding = false;
     s.hovered = None;
     s.point = None;
     s.trace = None;
     s.sync_rate();
+}
+
+/// Shows the Agents tab, on the agent it last showed.
+pub fn show_agents(s: &mut Ui, tx: &mut Tx) {
+    let agent = s.current_agent();
+    set_tab(s, agent, tx);
+}
+
+/// Moves the Agents tab `step` agents along, wrapping round.
+fn cycle_agent(s: &mut Ui, step: isize, tx: &mut Tx) -> bool {
+    let agents = s.agents();
+    if s.page != Page::Tab || s.tab.provider().is_none() || agents.len() < 2 {
+        return false;
+    }
+    let at = agents.iter().position(|&t| t == s.tab).unwrap_or(0) as isize;
+    let next = agents[(at + step).rem_euclid(agents.len() as isize) as usize];
+    set_tab(s, next, tx);
+    true
+}
+
+/// Opens or closes the Add an agent popover.
+pub fn toggle_adding(s: &mut Ui, tx: &mut Tx) {
+    tx.instant();
+    s.adding = !s.adding;
+    s.key_error = None;
+    if !s.adding {
+        s.deepseek_key = TextEdit::new("").secure();
+    }
+}
+
+/// Shows the Agents tab with the Add an agent popover open: Settings' Add buttons lead here.
+pub fn start_adding(s: &mut Ui, tx: &mut Tx) {
+    show_agents(s, tx);
+    s.adding = true;
+    s.key_error = None;
+}
+
+/// Saves the DeepSeek key typed in the Add an agent popover to the Keychain, and reads the
+/// balance with it. The DeepSeek tab appears once the balance arrives.
+pub fn add_deepseek_key(s: &mut Ui, tx: &mut Tx) {
+    let key = s.deepseek_key.text.trim().to_owned();
+    if key.is_empty() {
+        s.key_error = Some("Paste the key first.".to_owned());
+        return;
+    }
+    if !s.demo
+        && let Err(reason) = crate::deepseek::save_key(&key)
+    {
+        s.key_error = Some(reason);
+        return;
+    }
+    s.deepseek_key = TextEdit::new("").secure();
+    s.key_error = None;
+    s.adding = false;
+    s.agent_tab = Tab::DeepSeek;
+    s.send(Command::Refresh(Provider::DeepSeek));
+    tx.instant();
+}
+
+/// Reads `provider`'s login again, after the person signed in.
+pub fn check_again(s: &mut Ui, provider: Provider) {
+    s.send(Command::Refresh(provider));
 }
 
 pub fn set_battery_week(s: &mut Ui, week: bool) {
@@ -590,7 +714,7 @@ pub fn set_module_tab(s: &mut Ui, tab: Tab, on: bool, tx: &mut Tx) {
         module.tab = on;
     }
     if !on && s.tab == tab {
-        s.tab = Tab::Claude;
+        s.tab = s.current_agent();
     }
     save(s);
     s.sync_rate();
@@ -729,6 +853,7 @@ pub fn toggle_settings(s: &mut Ui, tx: &mut Tx) {
     // A different page, not a change to this one: nothing slides or fades across.
     tx.instant();
     s.page = if s.page == Page::Settings { Page::Tab } else { Page::Settings };
+    s.adding = false;
     s.point = None;
     s.sync_rate();
     if s.page == Page::Settings && !s.demo {
@@ -805,17 +930,22 @@ pub fn set_show_used(s: &mut Ui, show_used: bool) {
 
 pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
+        Key::Escape if s.adding => toggle_adding(s, tx),
         Key::Escape if matches!(s.reset, ResetFlow::Confirm(_) | ResetFlow::Failed { .. }) => crate::agents::cancel_reset(s),
         Key::Escape if s.page == Page::Settings => toggle_settings(s, tx),
         Key::Escape => close(s, tx),
         Key::Command(',') => toggle_settings(s, tx),
         Key::Command('r') => refresh(s),
         Key::Command('q') => tx.quit(),
-        // ⌘1, ⌘2…: the rail's tabs in order.
-        Key::Command(c @ '1'..='9') => match s.tabs().get(*c as usize - '1' as usize) {
+        // ⌘1: the agents. ⌘2, ⌘3…: this Mac's tabs in the top bar's order.
+        Key::Command('1') => show_agents(s, tx),
+        Key::Command(c @ '2'..='9') => match s.mac_tabs().get(*c as usize - '2' as usize) {
             Some(&tab) => set_tab(s, tab, tx),
             None => return false,
         },
+        // ⌘⇧[ and ⌘⇧]: the previous and next agent, as tabs switch across macOS.
+        Key::Command('[' | '{') if ev.mods.shift => return cycle_agent(s, -1, tx),
+        Key::Command(']' | '}') if ev.mods.shift => return cycle_agent(s, 1, tx),
         Key::Command('w') => close(s, tx),
         _ => return false,
     }
@@ -840,11 +970,12 @@ mod tests {
     #[test]
     fn the_panel_draws_its_limits_and_usage() {
         let rt = runtime();
-        for key in ["panel", "rail", "header", "limit-weekly", "limit-weekly-fable", "limit-chart", "limit-pill", "usage", "chart", "totals", "refresh"] {
+        for key in ["panel", "top-bar", "context", "agent-claude", "add-agent", "limit-weekly", "limit-weekly-fable", "limit-chart", "limit-pill", "usage", "chart", "totals", "projects", "project-0", "refresh"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
-        // The panel fits the window with its shadow room to spare.
+        // The panel is its one size, and fits the window with its shadow room to spare.
         let [_, y, _, h] = rt.presented("panel").unwrap().0;
+        assert_eq!(h, PANEL_H);
         assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall");
     }
 
@@ -905,7 +1036,7 @@ mod tests {
         rt.pointer_move(x + w * 0.25, y + h / 2.0);
         rt.frame(1.0 / 60.0);
         assert!(rt.state.trace.is_some_and(|at| (at - 0.25).abs() < 0.01));
-        let (fx, fy) = centre(&rt, "header");
+        let (fx, fy) = centre(&rt, "context");
         rt.pointer_move(fx, fy);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.trace, None);
@@ -933,7 +1064,7 @@ mod tests {
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.hovered, Some(5));
-        let (x, y) = centre(&rt, "header");
+        let (x, y) = centre(&rt, "context");
         rt.pointer_move(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.hovered, None);
@@ -942,14 +1073,14 @@ mod tests {
     #[test]
     fn the_settings_button_swaps_the_body_and_settings_apply() {
         let mut rt = runtime();
-        click(&mut rt, "settings");
+        click(&mut rt, "tab-settings");
         assert_eq!(rt.state.page, Page::Settings);
         assert!(rt.presented("limit-weekly").is_none() && rt.presented("settings-page").is_some());
         click(&mut rt, "menu-bar-Weekly");
         assert_eq!(rt.state.config.menu_bar, model::MenuBarMetric::Weekly);
         click(&mut rt, "percent-Used");
         assert!(rt.state.config.show_used);
-        click(&mut rt, "settings");
+        click(&mut rt, "tab-settings");
         assert_eq!(rt.state.page, Page::Tab);
     }
 
@@ -1038,28 +1169,77 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_switches_tabs_and_each_draws_its_own() {
+    fn the_top_bar_switches_tabs_and_each_draws_its_own() {
         let mut rt = runtime();
-        for key in ["rail", "tab-claude", "tab-cpu", "tab-memory", "settings", "quit"] {
+        for key in ["top-bar", "tab-agents", "tab-cpu", "tab-memory", "tab-settings"] {
             assert!(rt.presented(key).is_some(), "{key} is on screen");
         }
         click(&mut rt, "tab-cpu");
         assert_eq!(rt.state.tab, Tab::Cpu);
-        for key in ["cpu-hero", "cpu-split", "load", "cpu-chart", "chart-readout", "cpu-apps-0", "cpu-apps-rest", "cores", "core-9"] {
-            assert!(rt.presented(key).is_some(), "{key} is on screen");
-        }
+        assert!(rt.presented("cpu-chart").is_some() && rt.presented("chart-readout").is_some());
         assert!(rt.presented("limit-weekly").is_none());
         click(&mut rt, "tier-24h");
         assert_eq!(rt.state.tier, 2);
-        click(&mut rt, "tab-memory");
-        for key in ["memory-bar", "memory-apps-0", "memory-apps-4", "swap"] {
-            assert!(rt.presented(key).is_some(), "{key} is on screen");
-        }
+        rt.key(KeyEvent { key: Key::Command('3'), mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.tab, Tab::Memory, "⌘3 is this Mac's second tab");
         rt.key(KeyEvent { key: Key::Command('1'), mods: Mods::default() });
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.tab, Tab::Claude);
-        let [_, y, _, h] = rt.presented("panel").unwrap().0;
-        assert!(y + h + SHADOW_ROOM <= WINDOW_H, "the panel is {h} tall");
+        let [_, _, _, h] = rt.presented("panel").unwrap().0;
+        assert_eq!(h, PANEL_H, "every tab keeps the panel's size");
+    }
+
+    #[test]
+    fn the_agents_tab_switches_agents_and_remembers_the_last() {
+        let mut rt = runtime();
+        click(&mut rt, "agent-codex");
+        assert_eq!(rt.state.tab, Tab::Codex);
+        click(&mut rt, "tab-cpu");
+        click(&mut rt, "tab-agents");
+        assert_eq!(rt.state.tab, Tab::Codex, "Agents goes back to the agent it last showed");
+        let next = KeyEvent { key: Key::Command(']'), mods: Mods { shift: true, cmd: true, ..Mods::default() } };
+        rt.key(next.clone());
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.tab, Tab::DeepSeek);
+        rt.key(next);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.tab, Tab::Claude, "the next agent wraps round");
+    }
+
+    #[test]
+    fn add_opens_its_popover_and_escape_closes_it() {
+        let mut rt = runtime();
+        rt.update(|s, tx| {
+            tx.instant();
+            s.deepseek.ledger = None;
+            s.deepseek.problem = Some(Problem::SignedOut);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.presented("agent-deepseek").is_none(), "an agent never set up has no tab");
+        click(&mut rt, "add-agent");
+        assert!(rt.state.adding && rt.presented("add-popover").is_some() && rt.presented("deepseek-key").is_some());
+        click(&mut rt, "add-deepseek");
+        assert_eq!(rt.state.key_error.as_deref(), Some("Paste the key first."));
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.adding && rt.state.phase == Phase::Shown, "esc closes the popover before the panel");
+    }
+
+    #[test]
+    fn with_no_agent_the_tab_says_how_to_connect_one() {
+        let mut rt = runtime();
+        rt.update(|s, tx| {
+            tx.instant();
+            for agent in [&mut s.claude, &mut s.codex] {
+                agent.snapshot = None;
+                agent.problem = Some(Problem::SignedOut);
+            }
+            s.deepseek.ledger = None;
+            s.deepseek.problem = Some(Problem::SignedOut);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.presented("no-agents").is_some() && rt.presented("check-claude").is_some() && rt.presented("add-key").is_some());
     }
 
     #[test]
@@ -1073,30 +1253,30 @@ mod tests {
         rt.pointer_move(x + 0.2, y + h / 2.0);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.point, Some(0));
-        let (fx, fy) = centre(&rt, "header");
+        let (fx, fy) = centre(&rt, "context");
         rt.pointer_move(fx, fy);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.point, None);
     }
 
     #[test]
-    fn a_hidden_tab_leaves_the_rail_and_falls_back() {
+    fn a_hidden_tab_leaves_the_top_bar_and_falls_back() {
         let mut rt = runtime();
         click(&mut rt, "tab-cpu");
-        click(&mut rt, "settings");
+        click(&mut rt, "tab-settings");
         click(&mut rt, "cpu-tab");
         assert_eq!(rt.state.page, Page::Settings, "a switch keeps the settings open");
         assert!(!rt.state.config.cpu.tab);
-        assert_eq!(rt.state.tab, Tab::Claude, "the hidden tab gives way to Claude");
+        assert_eq!(rt.state.tab, Tab::Claude, "the hidden tab gives way to the agents");
         click(&mut rt, "memory-tab");
         assert!(!rt.state.config.memory.tab);
         for tab in [Tab::Disk, Tab::Network, Tab::Battery, Tab::Gpu] {
             click(&mut rt, &format!("{}-tab", tab.id()));
         }
-        click(&mut rt, "settings");
-        assert_eq!(rt.state.tabs(), vec![Tab::Claude, Tab::Codex, Tab::DeepSeek]);
-        // The rail stays for Settings and Quit, with no measures and no hairline before them.
-        assert!(rt.presented("rail").is_some() && rt.presented("tab-cpu").is_none() && rt.presented("rail-separator").is_none());
+        click(&mut rt, "tab-settings");
+        assert!(rt.state.mac_tabs().is_empty());
+        // The top bar keeps Agents and Settings, with no measures and no hairline between.
+        assert!(rt.presented("tab-agents").is_some() && rt.presented("tab-cpu").is_none() && rt.presented("bar-separator").is_none());
         assert!(rt.presented("limit-weekly").is_some());
     }
 
@@ -1119,7 +1299,7 @@ mod tests {
     #[test]
     fn each_provider_has_its_tab_and_a_reset_is_asked_before_it_is_spent() {
         let mut rt = runtime();
-        click(&mut rt, "tab-codex");
+        click(&mut rt, "agent-codex");
         for key in ["limit-session", "limit-weekly", "resets", "use-0", "limit-chart", "usage"] {
             assert!(rt.presented(key).is_some(), "{key} is on Codex's tab");
         }
@@ -1140,17 +1320,18 @@ mod tests {
         rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
         rt.frame(1.0 / 60.0);
         assert_eq!((rt.state.reset.clone(), rt.state.phase), (ResetFlow::Idle, Phase::Shown), "esc takes the question back before it closes the panel");
-        click(&mut rt, "tab-deepseek");
+        click(&mut rt, "agent-deepseek");
         for key in ["balance", "balance-total", "spend", "spend-6", "top-up"] {
             assert!(rt.presented(key).is_some(), "{key} is on DeepSeek's tab");
         }
     }
 
     #[test]
-    fn the_tallest_states_still_fit_the_window() {
+    fn the_panel_keeps_its_size_in_its_tallest_states() {
         let mut rt = runtime();
         let fits = |rt: &Runtime<Ui>, what: &str| {
             let [_, y, _, h] = rt.presented("panel").unwrap().0;
+            assert_eq!(h, PANEL_H, "{what}: the panel is {h} tall");
             assert!(y + h + SHADOW_ROOM <= WINDOW_H, "{what}: the panel is {h} tall");
         };
         rt.update(|s, tx| {
@@ -1160,11 +1341,14 @@ mod tests {
         });
         rt.frame(1.0);
         fits(&rt, "Claude running low and offline");
-        click(&mut rt, "tab-codex");
+        let [_, py, _, ph] = rt.presented("panel").unwrap().0;
+        let [_, ly, _, lh] = rt.presented("limit-legend").unwrap().0;
+        assert!(ly + lh <= py + ph, "the chart's legend stays inside the panel under the banner");
+        click(&mut rt, "agent-codex");
         click(&mut rt, "use-0");
         rt.frame(2.0);
         fits(&rt, "Codex asking about a reset");
-        click(&mut rt, "settings");
+        click(&mut rt, "tab-settings");
         rt.frame(3.0);
         fits(&rt, "the settings");
     }
