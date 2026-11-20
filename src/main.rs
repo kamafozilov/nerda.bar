@@ -21,6 +21,7 @@ mod burn_view;
 mod codex;
 mod codex_logs;
 mod claude;
+mod claude_desktop;
 mod config;
 mod deepseek;
 mod deepseek_view;
@@ -184,6 +185,11 @@ fn main() {
             ("expired", |s| s.claude.problem = Some(Problem::LoginExpired)),
             ("paused", |s| s.claude.problem = Some(Problem::RateLimited { until: s.now + 720 })),
             ("failed", |s| s.claude.problem = Some(Problem::Failed("The server answered 503.".to_owned()))),
+            ("plan-ends", |s| {
+                if let Some(snapshot) = &mut s.claude.snapshot {
+                    snapshot.subscription = Some(model::Subscription { until: s.now + 2 * 86_400 + 3 * 3600, renews: Some(false) });
+                }
+            }),
             ("codex", |s| s.tab = Tab::Codex),
             ("codex-confirm", |s| {
                 s.tab = Tab::Codex;

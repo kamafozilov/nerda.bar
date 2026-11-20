@@ -183,7 +183,7 @@ An instrument panel under the menu bar: one fixed 760×640 panel, read in a few 
 Structure, top to bottom:
 
 1. **Top bar (48pt):** icon-only tabs. Agents, a hairline, CPU, Memory, Disk, Network, Battery, GPU; Settings at the trailing end. A Mac without a battery has no Battery tab.
-2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Settings: the version and Quit.
+2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. The plan's line adds when it renews ("Ultra plan · Renews 22 Nov, 21:47"), ends (in the warning colour) or is paid until, with the full date and time on hover. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Settings: the version and Quit.
 3. **Body:** two columns of 380pt, divided by a hairline, each a stack of sections.
 
 ## Colors

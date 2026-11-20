@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::model::{Limit, Problem, Snapshot};
+use crate::model::{Limit, Problem, Snapshot, Subscription};
 use crate::time;
 
 const BASE: &str = "https://chatgpt.com/backend-api";
@@ -29,6 +29,8 @@ pub fn home() -> PathBuf {
 pub struct Credentials {
     access_token: String,
     account_id: Option<String>,
+    /// The end of the period the ChatGPT plan is paid for, as the login's ID token says.
+    paid_until: Option<i64>,
 }
 
 /// The CLI's login: `auth.json` in its home, else the Keychain item it keeps when set to.
@@ -68,7 +70,42 @@ fn parse_credentials(text: &str) -> Option<Credentials> {
         return None;
     }
     let account_id = tokens.get("account_id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
-    Some(Credentials { access_token, account_id })
+    let paid_until = tokens.get("id_token").and_then(Value::as_str).and_then(paid_until);
+    Some(Credentials { access_token, account_id, paid_until })
+}
+
+/// `chatgpt_subscription_active_until` from the ID token's claims: ISO 8601 or Unix seconds.
+fn paid_until(id_token: &str) -> Option<i64> {
+    let claims: Value = serde_json::from_slice(&base64_url(id_token.split('.').nth(1)?)?).ok()?;
+    match claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_subscription_active_until")? {
+        Value::String(text) => time::parse_iso(text),
+        Value::Number(number) => number.as_i64(),
+        _ => None,
+    }
+    .filter(|at| *at > 0)
+}
+
+/// Unpadded base64url, as a JWT's parts are written.
+fn base64_url(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut bits, mut count) = (0u32, 0u32);
+    for c in text.trim_end_matches('=').bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        bits = bits << 6 | value as u32;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            bytes.push((bits >> count) as u8);
+        }
+    }
+    Some(bytes)
 }
 
 fn get(agent: &ureq::Agent, credentials: &Credentials, path: &str) -> Result<Value, Problem> {
@@ -102,6 +139,7 @@ pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     let now = time::unix_now();
     let root = get(agent, &credentials, "/wham/usage")?;
     let mut snapshot = parse_usage(&root, now);
+    snapshot.subscription = credentials.paid_until.map(|until| Subscription { until, renews: None });
     if snapshot.resets.as_ref().is_some_and(|resets| resets.available > 0)
         && let Ok(list) = get(agent, &credentials, "/wham/rate-limit-reset-credits")
     {
@@ -162,7 +200,7 @@ fn parse_usage(root: &Value, now: i64) -> Snapshot {
         limits.extend(window(node, &id, &format!("{name} weekly"), true, now));
     }
     let resets = root.pointer("/rate_limit_reset_credits/available_count").and_then(Value::as_i64).filter(|n| *n > 0).map(|n| crate::model::Resets { available: n as u32, credits: Vec::new() });
-    Snapshot { plan: plan_name(root.get("plan_type").and_then(Value::as_str).unwrap_or("")), limits, extra: None, fetched_at: now, resets }
+    Snapshot { plan: plan_name(root.get("plan_type").and_then(Value::as_str).unwrap_or("")), limits, extra: None, fetched_at: now, resets, subscription: None }
 }
 
 fn parse_resets(root: &Value) -> crate::model::Resets {
@@ -250,6 +288,14 @@ mod tests {
         assert_eq!(login.access_token, "tok");
         assert_eq!(login.account_id.as_deref(), Some("acc"));
         assert!(parse_credentials(r#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#).is_none());
+    }
+
+    #[test]
+    fn the_paid_period_is_read_from_the_id_token() {
+        let payload = "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJwcm8iLCJjaGF0Z3B0X3N1YnNjcmlwdGlvbl9hY3RpdmVfdW50aWwiOiIyMDI2LTEyLTIwVDEwOjAwOjAwKzAwOjAwIn0sIm5vdGUiOiI_Pz4-In0";
+        let login = parse_credentials(&format!(r#"{{"tokens":{{"id_token":"h.{payload}.s","access_token":"tok"}}}}"#)).unwrap();
+        assert_eq!(login.paid_until, Some(1_797_760_800));
+        assert_eq!(paid_until("h.e30.s"), None);
     }
 
     #[test]

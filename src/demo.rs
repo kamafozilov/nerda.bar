@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::burn::{self, History};
-use crate::model::{ExtraUsage, Limit, Snapshot};
+use crate::model::{ExtraUsage, Limit, Snapshot, Subscription};
 use crate::stats::{Activity, Bar, ModelRow, ProjectRow, RangeView, StatsView};
 use crate::time::{self, MONTHS, WEEKDAYS};
 use crate::ui::Ui;
@@ -28,6 +28,7 @@ pub fn fill(ui: &mut Ui) {
         extra: Some(ExtraUsage { used: 12.4, limit: Some(50.0), currency: "USD".to_owned(), resets_at: None }),
         fetched_at: now - 140,
         resets: None,
+        subscription: Some(Subscription { until: now + 9 * 86_400 + 5 * 3600, renews: Some(true) }),
     });
     ui.claude.stats = Some(Arc::new(StatsView { ranges: [range(now, 1), range(now, 7), range(now, 30)], activity: activity(now) }));
     refill_history(ui);
@@ -54,6 +55,7 @@ fn codex(ui: &mut Ui) {
                 expires_at: Some(now + 18 * 86_400),
             }],
         }),
+        subscription: Some(Subscription { until: now + 23 * 86_400 + 2 * 3600, renews: None }),
     };
     let mut month = range(now, 30);
     let mut week = range(now, 7);

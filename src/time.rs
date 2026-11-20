@@ -147,6 +147,13 @@ pub fn month_day(unix: i64) -> String {
     format!("{} {}", MONTHS[date.month as usize - 1], date.day_of_month)
 }
 
+/// A moment ahead: within the year "11 Dec, 03:00", further off "9 Mar 2027".
+pub fn day_clock(at: i64, now: i64) -> String {
+    let date = local(at);
+    let month = MONTHS[date.month as usize - 1];
+    if at - now > 300 * 86_400 { self::date(at) } else { format!("{} {month}, {}", date.day_of_month, clock(at, false)) }
+}
+
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

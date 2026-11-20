@@ -16,19 +16,31 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::model::{ExtraUsage, Limit, Problem, Snapshot};
+use crate::model::{ExtraUsage, Limit, Problem, Snapshot, Subscription};
 use crate::time;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// How long to stay away after a 429 that names no `Retry-After`.
 const RATE_LIMIT_PAUSE: i64 = 300;
 const SESSION_WINDOW: i64 = 5 * 3600;
 const WEEK_WINDOW: i64 = 7 * 86_400;
+/// Seconds between asks for the renewal date, and after one that failed.
+const RENEWAL_EVERY: i64 = 6 * 3600;
+const RENEWAL_RETRY: i64 = 3600;
 
 /// A fingerprint of the last access token the server turned down, so it is not sent again.
 static REJECTED: Mutex<Option<u64>> = Mutex::new(None);
+
+/// The renewal date as last read, and when to read it again.
+struct Renewal {
+    subscription: Option<Subscription>,
+    next_check: i64,
+}
+
+static RENEWAL: Mutex<Renewal> = Mutex::new(Renewal { subscription: None, next_check: 0 });
 
 fn fingerprint(token: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -157,7 +169,49 @@ pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     let body = response.body_mut().read_to_string().map_err(|e| Problem::Offline(format!("Claude's answer was cut short: {e}.")))?;
     crate::debug(|| format!("usage answer: {body}"));
     let root: Value = serde_json::from_str(&body).map_err(|_| Problem::Failed("Claude's answer wasn't JSON.".to_owned()))?;
-    Ok(parse_usage(&root, credentials.plan, now))
+    let mut snapshot = parse_usage(&root, credentials.plan.clone(), now);
+    snapshot.subscription = subscription(agent, &credentials, now);
+    Ok(snapshot)
+}
+
+/// When the plan renews, read from claude.ai with the desktop app's session every few hours
+/// and when the last date read has passed. `None` without a signed-in desktop app.
+fn subscription(agent: &ureq::Agent, credentials: &Credentials, now: i64) -> Option<Subscription> {
+    let mut renewal = RENEWAL.lock().unwrap_or_else(|e| e.into_inner());
+    let passed = renewal.subscription.is_some_and(|s| s.until <= now);
+    if now < renewal.next_check && !passed {
+        return renewal.subscription;
+    }
+    let Some(session) = crate::claude_desktop::session() else {
+        renewal.subscription = None;
+        renewal.next_check = now + RENEWAL_EVERY;
+        return None;
+    };
+    let result = organization(agent, credentials).ok_or_else(|| "no organization in the profile".to_owned()).and_then(|org| crate::claude_desktop::subscription(&org, &session));
+    crate::debug(|| format!("claude renewal: {result:?}"));
+    match result {
+        Ok(subscription) => {
+            renewal.subscription = subscription;
+            renewal.next_check = now + RENEWAL_EVERY;
+        }
+        Err(_) => renewal.next_check = now + RENEWAL_RETRY,
+    }
+    renewal.subscription.filter(|s| s.until > now)
+}
+
+/// The organization the login's plan belongs to.
+fn organization(agent: &ureq::Agent, credentials: &Credentials) -> Option<String> {
+    let mut response = agent
+        .get(PROFILE_URL)
+        .header("Authorization", &format!("Bearer {}", credentials.access_token))
+        .header("Accept", "application/json")
+        .header("anthropic-beta", OAUTH_BETA)
+        .header("User-Agent", concat!("nerda-bar/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .ok()
+        .filter(|r| r.status() == 200)?;
+    let root: Value = serde_json::from_str(&response.body_mut().read_to_string().ok()?).ok()?;
+    root.pointer("/organization/uuid").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
 /// The HTTP client the provider uses: no status-as-error, so a 429's headers can be read.
@@ -222,7 +276,7 @@ fn parse_usage(root: &Value, plan: String, now: i64) -> Snapshot {
         }
     });
 
-    Snapshot { plan, limits, extra, fetched_at: now, resets: None }
+    Snapshot { plan, limits, extra, fetched_at: now, resets: None, subscription: None }
 }
 
 #[cfg(test)]

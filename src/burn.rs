@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn readings_keep_the_ends_of_a_flat_run_and_a_week_and_a_day() {
         let mut history = History::default();
-        let mut snapshot = Snapshot { plan: String::new(), limits: vec![weekly(10.0)], extra: None, fetched_at: START, resets: None };
+        let mut snapshot = Snapshot { plan: String::new(), limits: vec![weekly(10.0)], extra: None, fetched_at: START, resets: None, subscription: None };
         for step in 0..5 {
             snapshot.fetched_at = START + step * 300;
             history.record(&snapshot);

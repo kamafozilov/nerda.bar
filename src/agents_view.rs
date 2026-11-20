@@ -10,7 +10,7 @@ use rune::{Color, El, LineCap, Path, Shape, canvas, col, el, icon, row, spacer, 
 use crate::burn_view;
 use crate::icons;
 use crate::look::{self, BODY_H, GAP, INNER_W, Look, PAD_X, PAD_Y, ROW_H, TALL_ROW_H, TITLE_H, caption, cell, digits, figure, font, next_section, section, section_title, segment, segments};
-use crate::model::{self, ExtraUsage, Limit, Problem, Provider, Snapshot};
+use crate::model::{self, ExtraUsage, Limit, Problem, Provider, Snapshot, Subscription};
 use crate::stats::{CACHE_READ, CACHE_WRITE_1H, CACHE_WRITE_5M, INPUT, OUTPUT, RangeView};
 use crate::time;
 use crate::ui::{self, Range, Tab, Ui};
@@ -61,22 +61,43 @@ fn context(s: &Ui, l: &Look, agents: &[Tab], shown: Tab) -> El {
     tabs = tabs.child(el().w(4.0)).child(plus_button(l, s.adding));
     let provider = shown.provider().unwrap_or(Provider::Claude);
     let (plan, (words, warn), refreshing) = match provider {
-        Provider::DeepSeek => (Some("API balance".to_owned()), crate::deepseek_view::status_words(s), s.deepseek.refreshing),
+        Provider::DeepSeek => (Some(plan_line(l, "API balance".to_owned(), None, s.now)), crate::deepseek_view::status_words(s), s.deepseek.refreshing),
         provider => {
             let a = s.agent(provider);
             let limits = a.limits(s.now);
             let stale = limits.is_some() && a.problem.is_some();
-            let plan = limits.as_ref().map(|snapshot| snapshot.plan.clone()).filter(|plan| !plan.is_empty()).map(|plan| format!("{plan} plan"));
+            let plan = limits.as_ref().filter(|snapshot| !snapshot.plan.is_empty()).map(|snapshot| plan_line(l, format!("{} plan", snapshot.plan), snapshot.subscription, s.now));
             (plan, status_words(s, provider, limits.as_ref(), stale), a.refreshing)
         }
     };
     let mut lines = col().key("plan").items_end();
     if let Some(plan) = plan {
-        lines = lines.child(text(plan).font(font(11.0, 600.0)).color(l.dim));
+        lines = lines.child(plan);
     }
     lines = lines.child(text(words).key("updated").font(digits(11.0, if warn { 600.0 } else { 400.0 })).color(if warn { l.warning_text } else { l.faint }));
     let right = row().gap(12.0).center_y().child(lines).child(look::refresh_button(l, refreshing));
     look::context_bar(l, tabs, Some(right)).pl(12.0)
+}
+
+/// The plan's name, then when it renews, ends or is paid until while that is ahead: the full
+/// date and time in its help. A plan that ends reads as a warning.
+fn plan_line(l: &Look, plan: String, subscription: Option<Subscription>, now: i64) -> El {
+    let name = text(plan).font(font(11.0, 600.0)).color(l.dim);
+    let Some(subscription) = subscription.filter(|s| s.until > now) else { return name };
+    let (verb, on, color, weight) = match subscription.renews {
+        Some(true) => ("Renews", " on", l.dim, 400.0),
+        Some(false) => ("Ends", " on", l.warning_text, 600.0),
+        None => ("Paid until", "", l.dim, 400.0),
+    };
+    let at = subscription.until;
+    row()
+        .key("plan-date")
+        .gap(4.0)
+        .center_y()
+        .help(format!("{verb}{on} {} at {}", time::date(at), time::clock(at, false)))
+        .child(name)
+        .child(text("·").font(font(11.0, 400.0)).color(l.faint))
+        .child(text(format!("{verb} {}", time::day_clock(at, now))).font(digits(11.0, weight)).color(color))
 }
 
 /// An agent's tab: its mark and name, no numbers.

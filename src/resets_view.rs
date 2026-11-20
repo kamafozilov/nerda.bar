@@ -39,13 +39,6 @@ fn kinds(resets: &Resets) -> Vec<Kind<'_>> {
     kinds
 }
 
-/// "9 Mar 2027", or within the year "11 Dec, 03:00".
-fn expiry(at: i64, now: i64) -> String {
-    let date = time::local(at);
-    let month = time::MONTHS[date.month as usize - 1];
-    if at - now > 300 * 86_400 { time::date(at) } else { format!("{} {month}, {}", date.day_of_month, time::clock(at, false)) }
-}
-
 /// The plan's free resets, a fixed-height row per kind, and the height the section takes. While
 /// a reset is being asked about, its question takes the row's place and the column's room.
 pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> (El, f32) {
@@ -62,7 +55,7 @@ pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> (El, f
             continue;
         }
         let count = kind.credits.len();
-        let expires = kind.expires.map(|at| format!("{} {}", if count > 1 && kind.same_expiry { "All expire" } else { "Expires" }, expiry(at, s.now)));
+        let expires = kind.expires.map(|at| format!("{} {}", if count > 1 && kind.same_expiry { "All expire" } else { "Expires" }, time::day_clock(at, s.now)));
         let second = match (kind.description, expires) {
             (Some(description), Some(expires)) => format!("{description} · {expires}"),
             (Some(words), None) => words.to_owned(),
