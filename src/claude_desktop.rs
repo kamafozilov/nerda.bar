@@ -1,5 +1,7 @@
-//! When Claude's plan renews, which only claude.ai tells: asked with the claude.ai session the
-//! Claude desktop app keeps in its cookies.
+//! What claude.ai tells with the claude.ai session the Claude desktop app keeps in its cookies:
+//! when the plan renews, which only claude.ai knows, and the plan's limits when Claude Code's
+//! own login has expired. Claude Code sessions run from the desktop app use the app's login, so
+//! the CLI's login there can stay expired for days while the app's session stays fresh.
 //!
 //! The cookies are encrypted with a key the app keeps in the Keychain item "Claude Safe
 //! Storage", so macOS asks once whether it may be read. A refusal is kept until Nerda Bar
@@ -146,6 +148,32 @@ fn parse_subscription(root: &Value) -> Option<Subscription> {
     }
 }
 
+/// The organizations the session belongs to that can chat, in claude.ai's order.
+pub fn organizations(session: &str) -> Result<Vec<String>, String> {
+    let (status, body) = get("https://claude.ai/api/organizations", &format!("sessionKey={session}"))?;
+    if status != 200 {
+        return Err(format!("claude.ai answered {status}"));
+    }
+    let root: Value = serde_json::from_slice(&body).map_err(|_| "claude.ai's answer wasn't JSON".to_owned())?;
+    Ok(chat_organizations(&root))
+}
+
+fn chat_organizations(root: &Value) -> Vec<String> {
+    let orgs = root.as_array().map(Vec::as_slice).unwrap_or_default();
+    let can_chat = |org: &Value| org.get("capabilities").and_then(Value::as_array).is_some_and(|c| c.iter().any(|c| c.as_str() == Some("chat")));
+    orgs.iter().filter(|org| can_chat(org)).filter_map(|org| org.get("uuid").and_then(Value::as_str)).filter(|id| !id.is_empty()).map(str::to_owned).collect()
+}
+
+/// The limits of `org`'s plan, in the shape Anthropic's OAuth usage answer has.
+pub fn usage(org: &str, session: &str) -> Result<Value, String> {
+    let (status, body) = get(&format!("https://claude.ai/api/organizations/{org}/usage"), &format!("sessionKey={session}"))?;
+    if status != 200 {
+        return Err(format!("claude.ai answered {status}"));
+    }
+    crate::debug(|| format!("claude.ai usage answer: {}", String::from_utf8_lossy(&body)));
+    serde_json::from_slice(&body).map_err(|_| "claude.ai's answer wasn't JSON".to_owned())
+}
+
 /// A GET through an ephemeral URLSession, so nothing it is sent or answered is kept: the
 /// status and the body.
 fn get(url: &str, cookie: &str) -> Result<(isize, Vec<u8>), String> {
@@ -187,5 +215,16 @@ mod tests {
         let cancelled = serde_json::json!({"status": "active", "plan_ending_at": "2026-11-22T16:47:25Z", "next_charge_at": null});
         assert_eq!(parse_subscription(&cancelled), Some(Subscription { until: 1_795_366_045, renews: Some(false) }));
         assert_eq!(parse_subscription(&serde_json::json!({"status": "active"})), None);
+    }
+
+    #[test]
+    fn only_organizations_that_can_chat_are_listed() {
+        let root = serde_json::json!([
+            {"uuid": "api-org", "capabilities": ["api"]},
+            {"uuid": "max-org", "capabilities": ["chat", "claude_max"]},
+            {"uuid": "", "capabilities": ["chat"]}
+        ]);
+        assert_eq!(chat_organizations(&root), ["max-org"]);
+        assert!(chat_organizations(&serde_json::json!({"error": "x"})).is_empty());
     }
 }

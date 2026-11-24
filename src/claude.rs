@@ -1,8 +1,11 @@
 //! The Claude provider: reads Claude Code's login and asks Anthropic for the plan's limits.
 //!
 //! The login is only ever read. Claude Code rotates its refresh token when it renews the
-//! login, so renewing it from here could sign the CLI out; an expired login is reported
-//! instead and Claude Code renews it the next time it runs.
+//! login, so renewing it from here could sign the CLI out. When the login has expired, the
+//! limits are read from claude.ai with the Claude desktop app's session instead: Claude Code
+//! sessions run from the desktop app use the app's login and never renew the CLI's, so on a Mac
+//! that works in the app the CLI's login is expired most of the time. Only when neither works
+//! is the login reported expired, and Claude Code renews it the next time it runs.
 //!
 //! An expired login costs nothing to look at again: the expiry is in the login itself, and a
 //! token the server turned down is remembered, so it is not sent again. That lets the worker
@@ -30,6 +33,9 @@ const WEEK_WINDOW: i64 = 7 * 86_400;
 /// Seconds between asks for the renewal date, and after one that failed.
 const RENEWAL_EVERY: i64 = 6 * 3600;
 const RENEWAL_RETRY: i64 = 3600;
+/// Seconds to stay away from claude.ai after reading the limits there failed, so an expired
+/// login, looked at again every minute, doesn't ask claude.ai every minute too.
+const CLAUDE_AI_RETRY: i64 = 300;
 
 /// A fingerprint of the last access token the server turned down, so it is not sent again.
 static REJECTED: Mutex<Option<u64>> = Mutex::new(None);
@@ -41,6 +47,13 @@ struct Renewal {
 }
 
 static RENEWAL: Mutex<Renewal> = Mutex::new(Renewal { subscription: None, next_check: 0 });
+
+/// The organization of the login's plan as its profile last named it: claude.ai is only asked
+/// for that organization's limits, never another account's the desktop app may be signed in to.
+static ORGANIZATION: Mutex<Option<String>> = Mutex::new(None);
+
+/// When claude.ai may next be asked for the limits after a failed try.
+static CLAUDE_AI_NEXT_TRY: Mutex<i64> = Mutex::new(0);
 
 fn fingerprint(token: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -137,12 +150,19 @@ fn plan_name(subscription: &str, tier: &str) -> String {
     name
 }
 
-/// Asks Anthropic for the limits of the login's plan.
+/// Asks Anthropic for the limits of the login's plan, and claude.ai when the login has expired.
 pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     let credentials = credentials()?;
     let now = time::unix_now();
+    match fetch_oauth(agent, &credentials, now) {
+        Err(Problem::LoginExpired) => from_claude_ai(&credentials, now).ok_or(Problem::LoginExpired),
+        result => result,
+    }
+}
+
+fn fetch_oauth(agent: &ureq::Agent, credentials: &Credentials, now: i64) -> Result<Snapshot, Problem> {
     let rejected = *REJECTED.lock().unwrap_or_else(|e| e.into_inner());
-    if known_expired(&credentials, rejected, now) {
+    if known_expired(credentials, rejected, now) {
         return Err(Problem::LoginExpired);
     }
     let mut response = agent
@@ -170,13 +190,46 @@ pub fn fetch(agent: &ureq::Agent) -> Result<Snapshot, Problem> {
     crate::debug(|| format!("usage answer: {body}"));
     let root: Value = serde_json::from_str(&body).map_err(|_| Problem::Failed("Claude's answer wasn't JSON.".to_owned()))?;
     let mut snapshot = parse_usage(&root, credentials.plan.clone(), now);
-    snapshot.subscription = subscription(agent, &credentials, now);
+    snapshot.subscription = subscription(now, || organization(agent, credentials));
     Ok(snapshot)
+}
+
+/// The limits from claude.ai with the desktop app's session, or `None` when the app isn't
+/// signed in, is signed in to another account, or claude.ai didn't answer.
+fn from_claude_ai(credentials: &Credentials, now: i64) -> Option<Snapshot> {
+    let mut next_try = CLAUDE_AI_NEXT_TRY.lock().unwrap_or_else(|e| e.into_inner());
+    if now < *next_try {
+        return None;
+    }
+    let known = ORGANIZATION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let result = crate::claude_desktop::session().ok_or_else(|| "the desktop app isn't signed in".to_owned()).and_then(|session| {
+        let org = pick_organization(known.as_deref(), &crate::claude_desktop::organizations(&session)?).ok_or_else(|| "the desktop app is signed in to another account".to_owned())?;
+        let root = crate::claude_desktop::usage(&org, &session)?;
+        Ok((org, root))
+    });
+    crate::debug(|| format!("claude.ai limits: {:?}", result.as_ref().map(|_| ())));
+    let Ok((org, root)) = result else {
+        *next_try = now + CLAUDE_AI_RETRY;
+        return None;
+    };
+    *next_try = 0;
+    let mut snapshot = parse_usage(&root, credentials.plan.clone(), now);
+    snapshot.subscription = subscription(now, || Ok(org));
+    Some(snapshot)
+}
+
+/// The organization to ask claude.ai about: the login's own when the session has it, else,
+/// when the login's isn't known yet, the session's first that can chat.
+fn pick_organization(known: Option<&str>, session_orgs: &[String]) -> Option<String> {
+    match known {
+        Some(known) => session_orgs.iter().find(|org| *org == known).cloned(),
+        None => session_orgs.first().cloned(),
+    }
 }
 
 /// When the plan renews, read from claude.ai with the desktop app's session every few hours
 /// and when the last date read has passed. `None` without a signed-in desktop app.
-fn subscription(agent: &ureq::Agent, credentials: &Credentials, now: i64) -> Option<Subscription> {
+fn subscription(now: i64, organization: impl FnOnce() -> Result<String, String>) -> Option<Subscription> {
     let mut renewal = RENEWAL.lock().unwrap_or_else(|e| e.into_inner());
     let passed = renewal.subscription.is_some_and(|s| s.until <= now);
     if now < renewal.next_check && !passed {
@@ -187,7 +240,7 @@ fn subscription(agent: &ureq::Agent, credentials: &Credentials, now: i64) -> Opt
         renewal.next_check = now + RENEWAL_EVERY;
         return None;
     };
-    let result = organization(agent, credentials).ok_or_else(|| "no organization in the profile".to_owned()).and_then(|org| crate::claude_desktop::subscription(&org, &session));
+    let result = organization().and_then(|org| crate::claude_desktop::subscription(&org, &session));
     crate::debug(|| format!("claude renewal: {result:?}"));
     match result {
         Ok(subscription) => {
@@ -200,7 +253,14 @@ fn subscription(agent: &ureq::Agent, credentials: &Credentials, now: i64) -> Opt
 }
 
 /// The organization the login's plan belongs to.
-fn organization(agent: &ureq::Agent, credentials: &Credentials) -> Option<String> {
+/// Remembered, so claude.ai can be asked about the same organization once the login expires.
+fn organization(agent: &ureq::Agent, credentials: &Credentials) -> Result<String, String> {
+    let org = profile_organization(agent, credentials).ok_or_else(|| "no organization in the profile".to_owned())?;
+    *ORGANIZATION.lock().unwrap_or_else(|e| e.into_inner()) = Some(org.clone());
+    Ok(org)
+}
+
+fn profile_organization(agent: &ureq::Agent, credentials: &Credentials) -> Option<String> {
     let mut response = agent
         .get(PROFILE_URL)
         .header("Authorization", &format!("Bearer {}", credentials.access_token))
@@ -313,6 +373,15 @@ mod tests {
         // A token the server turned down stays expired; a renewed one is tried again.
         assert!(known_expired(&login(Some(500)), Some(fingerprint("abc")), 100));
         assert!(!known_expired(&login(Some(500)), Some(fingerprint("renewed")), 100));
+    }
+
+    #[test]
+    fn claude_ai_is_only_asked_about_the_login_s_own_organization() {
+        let orgs = ["a".to_owned(), "b".to_owned()];
+        assert_eq!(pick_organization(Some("b"), &orgs).as_deref(), Some("b"));
+        assert_eq!(pick_organization(Some("other"), &orgs), None);
+        assert_eq!(pick_organization(None, &orgs).as_deref(), Some("a"));
+        assert_eq!(pick_organization(None, &[]), None);
     }
 
     #[test]
