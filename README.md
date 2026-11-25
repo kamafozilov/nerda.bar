@@ -58,7 +58,7 @@ Nerda Bar shows how much of your AI plans is left and what you used (Claude, Cod
 
 ## What it shows
 
-The panel has one size on every tab. Its top bar holds the tabs as icons: **Agents**, then this Mac's measures (CPU, Memory, Disk, Network, Battery, GPU), and Settings at the end; each icon's tooltip names it and its shortcut. Under it, a context bar says what the tab is about: on Agents, a tab per signed-in agent (Claude, Codex, DeepSeek) and **+** to add one. A tab's body has two columns: charts take the height their column leaves, and lists show as many rows as fit. A click on a menu bar item opens the panel on its own tab.
+The panel has one size on every tab. Its top bar holds the tabs as icons: **Agents**, then this Mac's measures (CPU, Memory, Disk, Network, Battery, GPU), then **Sleep**, and Settings at the end; each icon's tooltip names it and its shortcut. Under it, a context bar says what the tab is about: on Agents, a tab per signed-in agent (Claude, Codex, DeepSeek) and **+** to add one. A tab's body has two columns: charts take the height their column leaves, and lists show as many rows as fit. A click on a menu bar item opens the panel on its own tab.
 
 ### Claude and Codex
 
@@ -113,6 +113,21 @@ security add-generic-password -s "Nerda Bar" -a deepseek -w
 
 **In the menu bar**, each measure can have an item of its own, in one of three styles: a ring filled to the share, a graph of the last half minute, or the name and number as text (`CPU 18%`, `NET ↓2.4 MB/s ↑380 KB/s`). ⌘-drag an item to move it; macOS keeps its place.
 
+### Sleep
+
+<img src="docs/images/sleep.png" width="50%" align="right" alt="The Sleep tab keeping the Mac awake: a ring with 42 min left, durations from Off to No limit, switches to keep the display on and to stay awake with the lid closed, the apps keeping it awake, the battery's idle timers, the lid and the last wake and sleep, and Display off, Sleep and Lock screen">
+
+The Sleep tab keeps this Mac from sleeping and shows what else does.
+
+- **Keep awake** for 15 minutes, 30 minutes, 1, 2 or 5 hours, or with **No limit** until you turn it off. The ring counts down the time left. While it runs, a cup in the menu bar shows the time left; a click opens the tab, and its menu has Stop Keeping Awake.
+- **While kept awake**: keep the display on too, or let it turn off while apps keep running. On a notebook, **Stay awake with the lid closed** asks for your password when it starts.
+- **Keeping it awake**: the apps that stop this Mac sleeping now, the longest first, each with how long it has. An app that runs `caffeinate` shows as itself.
+- **When idle**: when the display turns off and when the Mac sleeps, Low Power Mode, Wake for network access and Power Nap, for the battery and the power adapter apart. A change asks for your password.
+- **Lid and wake**: whether closing the lid sleeps the Mac, and when it last woke and slept.
+- **Now**: turn the display off, sleep, or lock the screen.
+
+<br clear="right">
+
 ### The menu bar
 
 Each provider has an item with its mark. Claude's shows the limit the settings pick and, with model limits on, each model's own limit beside it by name: `Weekly 59%  Fable 42%`, or on a plan with a session `Session 24%  Fable 42%`. Codex shows its 5-hour or weekly limit, and DeepSeek its balance. Numbers turn orange at 30% left and red at 10%, and dim when they could not be refreshed. Codex and DeepSeek add their items once they are signed in.
@@ -122,7 +137,7 @@ Each provider has an item with its mark. Claude's shows the limit the settings p
 | Key | Action |
 | --- | --- |
 | ⌘1 | Agents |
-| ⌘2 … ⌘7 | This Mac's tabs, in the top bar's order |
+| ⌘2 … ⌘8 | This Mac's tabs and Sleep, in the top bar's order |
 | ⌘⇧[ ⌘⇧] | The previous and next agent |
 | ⌘R | Refresh the shown provider now |
 | ⌘, | Settings |
@@ -139,6 +154,8 @@ Each provider has an item with its mark. Claude's shows the limit the settings p
 - **The limit chart** draws what each refresh read, kept for 8 days (`history.json`, `codex-history.json`). Where there are no readings, what the limit gained is spread over its hours by this Mac's activity and drawn paler as an estimate.
 - **Usage** is counted from the session logs: Claude Code's under `~/.claude/projects`, each message once; the Codex CLI's under `~/.codex/sessions`, each response once. **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day.
 - **This Mac** is read from macOS itself, as Activity Monitor reads it: CPU ticks and memory pages from the kernel, disk and GPU statistics and the battery from IOKit, volumes from the file system, traffic from each interface's counters and its name from the network settings. None of it needs a password. Measures are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the history needs them, and not at all with every tab and item off. The battery's charge is kept for a week in `battery.json`; the rest of the history is kept in memory.
+
+- **Sleep** is read from macOS too: the idle timers from `pmset -g custom`, the apps keeping the Mac awake from the power assertions they hold, the lid and the last wake from IOKit, and when it slept and woke from the kernel. They are read when the tab opens and every 15 seconds while it shows. **Keep awake** is a power assertion, as `caffeinate` makes, which needs no password; macOS lets go of it when its time is up or Nerda Bar quits. Changing an idle timer runs `pmset` after macOS's password dialog. **Staying awake with the lid closed** turns sleep off (`pmset disablesleep 1`) after the same dialog, and starts a watcher that turns it back on as soon as the keep-awake ends or Nerda Bar quits or crashes. If the Mac is shut down while it is on, the tab says sleep is still off and offers to turn it back on.
 
 None of it leaves your Mac, except each provider's own request to its own service.
 
@@ -159,12 +176,13 @@ The panel's settings cover all but the last two of these. Everything lives in `~
   "network": { "menu_bar": "off", "tab": true },
   "battery": { "menu_bar": "off", "tab": true },
   "gpu": { "menu_bar": "off", "tab": true },
+  "sleep": { "tab": true, "menu_bar": true, "display": true, "lid": false },
   "refresh_minutes": 5,
   "material": "popover"
 }
 ```
 
-`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left); a plan without a session limit shows the weekly one. `menu_bar_models` adds each model's own limit beside it. Each measure says how its menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has its tab. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
+`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left); a plan without a session limit shows the weekly one. `menu_bar_models` adds each model's own limit beside it. Each measure says how its menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has its tab. `sleep` says whether the Sleep tab shows, whether a keep-awake has its cup in the menu bar, and whether it keeps the display on and the Mac awake with the lid closed. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
 
 ## Build it yourself
 
@@ -191,6 +209,7 @@ target/release/nerda-bar --snap panel.png --theme dark
 target/release/nerda-bar --snap low.png --scene low --theme light
 target/release/nerda-bar --snap cpu.png --scene cpu --theme dark
 target/release/nerda-bar --snap codex.png --scene codex-confirm
+target/release/nerda-bar --snap sleep.png --scene sleep-awake
 target/release/nerda-bar --list-scenes
 ```
 
@@ -205,10 +224,11 @@ target/release/nerda-bar --list-scenes
 - `src/agents_view.rs`, `src/burn_view.rs`, `src/resets_view.rs`: the Agents tab for Claude and Codex, the limit chart, free resets
 - `src/deepseek_view.rs`: DeepSeek's tab; `src/add_view.rs`: no agent yet, and the Add an agent popover
 - `src/system_view.rs`, `src/mac_view.rs`: this Mac's tabs
+- `src/sleep_view.rs`, `src/awake.rs`: the Sleep tab, and keeping the Mac awake
 - `src/settings_view.rs`: the settings
 - `src/status_item.rs`: the menu bar items, their glyphs and their menu (AppKit)
 - `src/worker.rs`: the background thread and each provider's schedule
-- `src/system/`: this Mac's measures: the thread that reads them (`mod.rs`, `more.rs`), their history (`history.rs`), the apps behind them (`apps.rs`), and the readers (`mac.rs`, `disk.rs`, `net.rs`, `battery.rs`, `gpu.rs`, `iokit.rs`)
+- `src/system/`: this Mac's measures: the thread that reads them (`mod.rs`, `more.rs`), their history (`history.rs`), the apps behind them (`apps.rs`), the readers (`mac.rs`, `disk.rs`, `net.rs`, `battery.rs`, `gpu.rs`, `iokit.rs`), and sleep's state and its commands (`power.rs`)
 - `src/claude.rs`, `src/codex.rs`, `src/deepseek.rs`: the providers
 - `src/stats.rs`, `src/codex_logs.rs`: token counts from the session logs
 - `src/prices.rs`: API prices

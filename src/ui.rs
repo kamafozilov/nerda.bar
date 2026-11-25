@@ -80,6 +80,8 @@ pub enum Tab {
     Network,
     Battery,
     Gpu,
+    /// Keeping this Mac awake, its idle timers and its lid.
+    Sleep,
 }
 
 impl Tab {
@@ -97,6 +99,7 @@ impl Tab {
             Tab::Network => "network",
             Tab::Battery => "battery",
             Tab::Gpu => "gpu",
+            Tab::Sleep => "sleep",
         }
     }
 
@@ -110,6 +113,7 @@ impl Tab {
             "network" => Tab::Network,
             "battery" => Tab::Battery,
             "gpu" => Tab::Gpu,
+            "sleep" => Tab::Sleep,
             _ => Tab::Claude,
         }
     }
@@ -125,11 +129,13 @@ impl Tab {
             Tab::Network => "Network",
             Tab::Battery => "Battery",
             Tab::Gpu => "GPU",
+            Tab::Sleep => "Sleep",
         }
     }
 
+    /// One of this Mac's measures, which the sampler reads.
     pub fn is_system(self) -> bool {
-        self.provider().is_none()
+        Tab::SYSTEM.contains(&self)
     }
 
     /// The provider a tab shows, for a provider's tab.
@@ -146,6 +152,7 @@ impl Tab {
     pub fn icon(self) -> &'static rune::Icon {
         match self {
             Tab::Claude | Tab::Codex | Tab::DeepSeek => &crate::icons::SPARKLES,
+            Tab::Sleep => &crate::icons::MOON,
             tab => crate::system_view::glyph(tab),
         }
     }
@@ -162,6 +169,7 @@ impl Tab {
             Tab::Network => "Net",
             Tab::Battery => "Batt",
             Tab::Gpu => "GPU",
+            Tab::Sleep => "Sleep",
         }
     }
 }
@@ -254,6 +262,8 @@ pub struct Ui {
     pub images: Option<ImageCache>,
     /// The icons the panel has asked for, held so they decode once.
     icons: RefCell<HashMap<PathBuf, Image>>,
+    /// Keeping this Mac awake, and sleep's state as the Sleep tab last read it.
+    pub awake: crate::awake::Awake,
     /// Launch at Login: whether it can be switched here, and whether it is on.
     pub login: (bool, bool),
     pub phase: Phase,
@@ -270,6 +280,7 @@ pub struct Ui {
 
 impl Ui {
     pub fn new(me: AppHandle<Ui>, worker: Option<Worker>, sampler: Option<Sampler>, config: Config, data_dir: PathBuf, cached: (Option<Snapshot>, Option<Snapshot>), demo: bool) -> Ui {
+        let awake = crate::awake::Awake::new(&data_dir, demo);
         let mut ui = Ui {
             me,
             worker,
@@ -298,6 +309,7 @@ impl Ui {
             rate: Cell::new(Rate::Off),
             images: None,
             icons: RefCell::new(HashMap::new()),
+            awake,
             login: (false, false),
             phase: if demo { Phase::Shown } else { Phase::Hidden },
             now: time::unix_now(),
@@ -361,7 +373,7 @@ impl Ui {
 
     pub fn module(&self, tab: Tab) -> Option<Module> {
         match tab {
-            Tab::Claude | Tab::Codex | Tab::DeepSeek => None,
+            Tab::Claude | Tab::Codex | Tab::DeepSeek | Tab::Sleep => None,
             Tab::Cpu => Some(self.config.cpu),
             Tab::Memory => Some(self.config.memory),
             Tab::Disk => Some(self.config.disk),
@@ -373,7 +385,7 @@ impl Ui {
 
     fn module_mut(&mut self, tab: Tab) -> Option<&mut Module> {
         match tab {
-            Tab::Claude | Tab::Codex | Tab::DeepSeek => None,
+            Tab::Claude | Tab::Codex | Tab::DeepSeek | Tab::Sleep => None,
             Tab::Cpu => Some(&mut self.config.cpu),
             Tab::Memory => Some(&mut self.config.memory),
             Tab::Disk => Some(&mut self.config.disk),
@@ -414,12 +426,22 @@ impl Ui {
         Tab::SYSTEM.into_iter().filter(|&tab| self.module(tab).is_some_and(|m| m.tab) && !(tab == Tab::Battery && no_battery)).collect()
     }
 
-    /// The shortcut that shows `tab`: ⌘1 for the agents, ⌘2 on for this Mac's tabs in order.
+    /// The tabs after Agents in the top bar, in its order: this Mac's measures, then Sleep.
+    pub fn bar_tabs(&self) -> Vec<Tab> {
+        let mut tabs = self.mac_tabs();
+        if self.config.sleep.tab {
+            tabs.push(Tab::Sleep);
+        }
+        tabs
+    }
+
+    /// The shortcut that shows `tab`: ⌘1 for the agents, ⌘2 on for the top bar's tabs after
+    /// it in order.
     pub fn shortcut(&self, tab: Tab) -> Option<String> {
         if tab.provider().is_some() {
             return Some("⌘1".to_owned());
         }
-        let at = self.mac_tabs().iter().position(|&t| t == tab)?;
+        let at = self.bar_tabs().iter().position(|&t| t == tab)?;
         (at < 8).then(|| format!("⌘{}", at + 2))
     }
 
@@ -526,6 +548,9 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     s.hovered = None;
     s.point = None;
     s.trace = None;
+    if s.tab == Tab::Sleep {
+        crate::awake::read(s);
+    }
     let [left, right] = anchor.screen;
     // Centred under the item, kept on its display.
     let x = (anchor.x - WINDOW_W / 2.0).min(right - WINDOW_W + SHADOW_ROOM - 8.0).max(left - SHADOW_ROOM + 8.0);
@@ -591,6 +616,9 @@ pub fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         // Countdowns move only while the panel shows, so a hidden panel never wakes.
         Phase::Shown if !s.demo && clock >= s.tick_due => {
             s.now = time::unix_now();
+            if s.page == Page::Tab && s.tab == Tab::Sleep {
+                crate::awake::refresh_state(s);
+            }
             s.tick_due = clock + TICK_SECONDS;
             tx.wake_at(s.tick_due);
             true
@@ -626,7 +654,7 @@ pub fn apply_system(s: &mut Ui, view: Arc<SystemView>, tx: &mut Tx) -> bool {
 
 /// The tab to show for `tab`: itself while the panel has it, else the Agents tab's agent.
 fn shown_tab(s: &Ui, tab: Tab) -> Tab {
-    let there = if tab.provider().is_some() { s.agents().contains(&tab) } else { s.mac_tabs().contains(&tab) };
+    let there = if tab.provider().is_some() { s.agents().contains(&tab) } else { s.bar_tabs().contains(&tab) };
     if there { tab } else { s.current_agent() }
 }
 
@@ -644,6 +672,9 @@ pub fn set_tab(s: &mut Ui, tab: Tab, tx: &mut Tx) {
     s.point = None;
     s.trace = None;
     s.sync_rate();
+    if tab == Tab::Sleep {
+        crate::awake::read(s);
+    }
 }
 
 /// Shows the Agents tab, on the agent it last showed.
@@ -765,6 +796,23 @@ pub fn set_module_tab(s: &mut Ui, tab: Tab, on: bool, tx: &mut Tx) {
     s.sync_rate();
 }
 
+/// Shows or hides the Sleep tab.
+pub fn set_sleep_tab(s: &mut Ui, on: bool, tx: &mut Tx) {
+    tx.instant();
+    s.config.sleep.tab = on;
+    if !on && s.tab == Tab::Sleep {
+        s.tab = s.current_agent();
+    }
+    save(s);
+}
+
+/// Whether a keep-awake puts a cup in the menu bar while it runs.
+pub fn set_sleep_menu_bar(s: &mut Ui, on: bool) {
+    s.config.sleep.menu_bar = on;
+    save(s);
+    crate::awake::sync_item(s);
+}
+
 fn save(s: &Ui) {
     if !s.demo {
         config::save(&s.data_dir, &s.config);
@@ -852,8 +900,13 @@ fn measure(view: &SystemView, tab: Tab) -> Option<Measure> {
     })
 }
 
-/// Refreshes the provider whose tab shows, or Claude's from elsewhere.
+/// Refreshes the provider whose tab shows, or Claude's from elsewhere; on Sleep, reads sleep's
+/// state again.
 pub fn refresh(s: &mut Ui) {
+    if s.page == Page::Tab && s.tab == Tab::Sleep {
+        crate::awake::read(s);
+        return;
+    }
     s.send(Command::Refresh(s.tab.provider().unwrap_or(Provider::Claude)));
 }
 
@@ -982,9 +1035,9 @@ pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Command(',') => toggle_settings(s, tx),
         Key::Command('r') => refresh(s),
         Key::Command('q') => tx.quit(),
-        // ⌘1: the agents. ⌘2, ⌘3…: this Mac's tabs in the top bar's order.
+        // ⌘1: the agents. ⌘2, ⌘3…: the top bar's tabs after it, in its order.
         Key::Command('1') => show_agents(s, tx),
-        Key::Command(c @ '2'..='9') => match s.mac_tabs().get(*c as usize - '2' as usize) {
+        Key::Command(c @ '2'..='9') => match s.bar_tabs().get(*c as usize - '2' as usize) {
             Some(&tab) => set_tab(s, tab, tx),
             None => return false,
         },
@@ -1396,6 +1449,68 @@ mod tests {
         click(&mut rt, "tab-settings");
         rt.frame(3.0);
         fits(&rt, "the settings");
+    }
+
+    #[test]
+    fn the_sleep_tab_keeps_the_mac_awake_for_the_time_picked() {
+        let mut rt = runtime();
+        click(&mut rt, "tab-sleep");
+        assert_eq!(rt.state.tab, Tab::Sleep);
+        for key in ["keep-awake", "durations", "while-awake", "keep-display", "keep-lid", "holders", "holder-0", "when-idle", "display-after", "sleep-after", "power-lid", "now-sleep", "now-lock"] {
+            assert!(rt.presented(key).is_some(), "{key} is on the Sleep tab");
+        }
+        assert!(rt.state.awake.session.is_none());
+        click(&mut rt, "duration-1h");
+        let session = rt.state.awake.session.as_ref().expect("a session runs");
+        assert_eq!((session.minutes, session.until.map(|until| until - session.started)), (60, Some(3600)));
+        click(&mut rt, "duration-No limit");
+        assert_eq!(rt.state.awake.session.as_ref().map(|s| (s.minutes, s.until)), Some((0, None)), "no limit runs until it is turned off");
+        click(&mut rt, "keep-lid");
+        assert_eq!(rt.state.awake.session.as_ref().map(|s| s.lid), Some(crate::awake::LidHold::On));
+        click(&mut rt, "duration-off");
+        assert!(rt.state.awake.session.is_none(), "Off lets it sleep again");
+        click(&mut rt, "display-after-10m");
+        assert_eq!(rt.state.awake.view.as_ref().and_then(|v| v.battery.as_ref()).and_then(|t| t.display), Some(10));
+        click(&mut rt, "idle-adapter");
+        assert!(rt.presented("display-after-20m").is_some(), "the adapter's own timers show");
+        let [_, _, _, h] = rt.presented("panel").unwrap().0;
+        assert_eq!(h, PANEL_H);
+    }
+
+    #[test]
+    fn sleep_follows_the_mac_tabs_in_the_shortcuts_and_can_be_hidden() {
+        let mut rt = runtime();
+        assert_eq!(rt.state.shortcut(Tab::Sleep).as_deref(), Some("⌘8"), "after this Mac's six tabs");
+        rt.key(KeyEvent { key: Key::Command('8'), mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.tab, Tab::Sleep);
+        assert_eq!(rt.state.wanted_rate(), Rate::Background, "Sleep reads no measures");
+        click(&mut rt, "tab-settings");
+        click(&mut rt, "sleep-tab");
+        assert!(!rt.state.config.sleep.tab);
+        assert_eq!(rt.state.tab, Tab::Claude, "the hidden tab gives way to the agents");
+        click(&mut rt, "tab-settings");
+        assert!(rt.presented("tab-sleep").is_none() && rt.presented("sleep-separator").is_none());
+    }
+
+    #[test]
+    fn the_sleep_tab_keeps_the_panels_size_with_its_banner() {
+        let mut rt = runtime();
+        rt.update(|s, tx| {
+            tx.instant();
+            set_tab(s, Tab::Sleep, tx);
+            s.awake.left_off = true;
+        });
+        rt.frame(1.0);
+        assert!(rt.presented("sleep-banner").is_some() && rt.presented("allow-sleep").is_some());
+        let [_, py, _, ph] = rt.presented("panel").unwrap().0;
+        assert_eq!(ph, PANEL_H);
+        for key in ["now-display-off", "holders"] {
+            let [_, y, _, h] = rt.presented(key).unwrap().0;
+            assert!(y + h <= py + ph + 0.5, "{key} stays inside the panel under the banner");
+        }
+        click(&mut rt, "allow-sleep");
+        assert!(!rt.state.awake.left_off);
     }
 
     #[test]

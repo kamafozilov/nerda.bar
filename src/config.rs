@@ -34,6 +34,28 @@ pub struct Config {
     /// On a Mac without a battery the tab never shows, whatever this says.
     pub battery: Module,
     pub gpu: Module,
+    /// The Sleep tab, and how it keeps this Mac awake.
+    pub sleep: SleepConfig,
+}
+
+/// The Sleep tab: whether it shows, whether a keep-awake has a menu bar item while it runs,
+/// and what the next one keeps on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SleepConfig {
+    pub tab: bool,
+    /// A cup in the menu bar while this Mac is kept awake, with the time left.
+    pub menu_bar: bool,
+    /// Keep the display on too, not only the Mac.
+    pub display: bool,
+    /// Also keep it awake with the lid closed, which asks for a password.
+    pub lid: bool,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self { tab: true, menu_bar: true, display: true, lid: false }
+    }
 }
 
 /// What a provider's menu bar item shows, for a provider other than Claude (whose settings
@@ -102,6 +124,7 @@ impl Default for Config {
             network: Module::default(),
             battery: Module::default(),
             gpu: Module::default(),
+            sleep: SleepConfig::default(),
         }
     }
 }

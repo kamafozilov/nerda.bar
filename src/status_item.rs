@@ -20,6 +20,8 @@ use rune::AppHandle;
 use crate::model::Severity;
 use crate::ui::{self, Anchor, Tab, Ui};
 
+/// The keep-awake item's id, which opens the Sleep tab.
+pub const AWAKE: &str = "sleep";
 const TAG_USED: isize = 1;
 const TAG_LOGIN: isize = 2;
 /// The mark's side in points: the size of the system's own menu bar icons.
@@ -35,6 +37,12 @@ pub struct Mark {
 
 pub const CLAUDE_MARK: Mark = Mark { path: include_str!("../assets/providers/claude.path"), view: 100.0, even_odd: false };
 pub const OPENAI_MARK: Mark = Mark { path: include_str!("../assets/providers/openai.path"), view: 24.0, even_odd: true };
+/// Keeping awake: a cup, its handle cut out, three wisps of steam over it.
+pub const CUP_MARK: Mark = Mark {
+    path: "M2.5 6 H11.5 V10 C11.5 12.2 9.7 14 7.5 14 H6.5 C4.3 14 2.5 12.2 2.5 10 Z M11.5 7 H12.75 C14 7 15 8 15 9.25 C15 10.5 14 11.5 12.75 11.5 H11.5 Z M11.5 8.4 H12.75 C13.2 8.4 13.6 8.8 13.6 9.25 C13.6 9.7 13.2 10.1 12.75 10.1 H11.5 Z M4.4 1.5 H5.6 V4.5 H4.4 Z M6.4 1.5 H7.6 V4.5 H6.4 Z M8.4 1.5 H9.6 V4.5 H8.4 Z",
+    view: 16.0,
+    even_odd: true,
+};
 pub const DEEPSEEK_MARK: Mark = Mark { path: include_str!("../assets/providers/deepseek.path"), view: 24.0, even_odd: false };
 
 /// A picture drawn beside a measure's number, in place of a provider's mark.
@@ -99,6 +107,11 @@ define_class!(
                 let tab = Tab::from_id(self.ivars().provider);
                 self.ivars().app.update(move |s, tx| ui::toggle(s, anchor, tab, tx));
             }
+        }
+
+        #[unsafe(method(stopAwake:))]
+        fn stop_awake(&self, _sender: Option<&AnyObject>) {
+            self.ivars().app.update(crate::awake::stop);
         }
 
         #[unsafe(method(refresh:))]
@@ -406,8 +419,12 @@ fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str
     };
 
     let menu = NSMenu::new(mtm);
-    // A provider's limits refresh and read as left or used; a measure's do neither.
-    if mark.is_some() {
+    // A provider's limits refresh and read as left or used; a measure's do neither, and the
+    // keep-awake item ends what it shows.
+    if provider == AWAKE {
+        menu.addItem(&item("Stop Keeping Awake", sel!(stopAwake:)));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    } else if mark.is_some() {
         menu.addItem(&item(&format!("Refresh {name}"), sel!(refresh:)));
         menu.addItem(&tagged(item("Show Used Instead of Left", sel!(toggleUsed:)), TAG_USED));
         menu.addItem(&NSMenuItem::separatorItem(mtm));

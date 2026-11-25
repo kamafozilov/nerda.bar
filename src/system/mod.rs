@@ -15,6 +15,7 @@ mod iokit;
 mod mac;
 mod more;
 pub mod net;
+pub mod power;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};

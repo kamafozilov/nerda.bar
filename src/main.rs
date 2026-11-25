@@ -16,6 +16,7 @@ mod add_view;
 mod agents;
 mod agents_view;
 mod alloc;
+mod awake;
 mod burn;
 mod burn_view;
 mod codex;
@@ -33,6 +34,7 @@ mod model;
 mod prices;
 mod resets_view;
 mod settings_view;
+mod sleep_view;
 mod stats;
 mod status_item;
 mod system;
@@ -149,6 +151,56 @@ fn main() {
                 }
             }),
             ("gpu", |s| s.tab = Tab::Gpu),
+            ("sleep", |s| s.tab = Tab::Sleep),
+            ("sleep-awake", |s| {
+                s.tab = Tab::Sleep;
+                awake::start(s, 60);
+                if let Some(session) = &mut s.awake.session {
+                    session.started -= 18 * 60;
+                    session.until = session.until.map(|until| until - 18 * 60);
+                }
+            }),
+            ("sleep-forever", |s| {
+                s.tab = Tab::Sleep;
+                s.config.sleep.lid = true;
+                s.config.sleep.display = false;
+                awake::start(s, 0);
+                if let Some(view) = &mut s.awake.view {
+                    std::sync::Arc::make_mut(view).sleep_disabled = true;
+                }
+            }),
+            ("sleep-hours", |s| {
+                s.tab = Tab::Sleep;
+                awake::start(s, 300);
+            }),
+            ("sleep-adapter", |s| {
+                s.tab = Tab::Sleep;
+                s.awake.source = Some(system::power::Source::Adapter);
+            }),
+            ("sleep-desktop", |s| {
+                s.tab = Tab::Sleep;
+                if let Some(view) = &mut s.awake.view {
+                    let view = std::sync::Arc::make_mut(view);
+                    (view.battery, view.lid, view.on_battery) = (None, None, false);
+                }
+            }),
+            ("sleep-left-off", |s| {
+                s.tab = Tab::Sleep;
+                s.awake.left_off = true;
+                if let Some(view) = &mut s.awake.view {
+                    std::sync::Arc::make_mut(view).sleep_disabled = true;
+                }
+            }),
+            ("sleep-error", |s| {
+                s.tab = Tab::Sleep;
+                s.awake.error = Some("Couldn't change it: The administrator user name or password was incorrect.".to_owned());
+            }),
+            ("sleep-empty", |s| {
+                s.tab = Tab::Sleep;
+                if let Some(view) = &mut s.awake.view {
+                    std::sync::Arc::make_mut(view).holders.clear();
+                }
+            }),
             ("memory-warning", |s| {
                 s.tab = Tab::Memory;
                 if let Some(view) = &mut s.system

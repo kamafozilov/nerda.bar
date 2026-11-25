@@ -197,8 +197,22 @@ fn heading(l: &Look, width: f32, words: &str) -> El {
 fn this_mac(s: &Ui, l: &Look) -> El {
     let head = row().gap(ROW_PAD).center_y().child(heading(l, STYLES_W, "Menu bar")).child(heading(l, SWITCH_W, "Tab"));
     let no_battery = s.system.as_ref().is_some_and(|view| view.battery.is_none());
-    let rows = Tab::SYSTEM.into_iter().map(|tab| measure(s, l, tab, tab == Tab::Battery && no_battery)).collect();
+    let mut rows: Vec<El> = Tab::SYSTEM.into_iter().map(|tab| measure(s, l, tab, tab == Tab::Battery && no_battery)).collect();
+    rows.push(sleep(s, l));
     group(l, "settings-mac", &icons::LAPTOP, l.dim, "This Mac", Some(head), rows)
+}
+
+/// Sleep's row: a cup in the menu bar while the Mac is kept awake, and whether it has a tab.
+fn sleep(s: &Ui, l: &Look) -> El {
+    let lead = row().gap(10.0).center_y().child(icon(&icons::MOON, 14.0).color(l.dim)).child(name(l, "Sleep"));
+    let on = s.config.sleep.menu_bar;
+    let mut styles = segments(l, "sleep-menu-bar").w(STYLES_W).label("Keep awake in the menu bar");
+    for (shown, label) in [(false, "Off"), (true, "While awake")] {
+        styles = styles.child(segment(l, format!("sleep-menu-bar-{label}"), label, on == shown, move |s: &mut Ui| ui::set_sleep_menu_bar(s, shown)).grow(1.0).px(0.0));
+    }
+    let tab = s.config.sleep.tab;
+    let tab_switch = switch(l, "sleep-tab", "Sleep tab", tab, true).on_press_tx(move |s: &mut Ui, tx| ui::set_sleep_tab(s, !tab, tx));
+    setting(lead, row().gap(ROW_PAD).center_y().child(styles.help("A cup and the time left, while this Mac is kept awake")).child(tab_switch)).key("settings-sleep")
 }
 
 /// A measure's row: its menu bar style and whether it has a tab, or why it has neither.

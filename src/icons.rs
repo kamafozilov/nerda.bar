@@ -40,6 +40,28 @@ pub static ARROW_UP_FROM_LINE: Icon = Icon { name: "nerda-arrow-up-from-line", v
 pub static ARROW_DOWN: Icon = Icon { name: "nerda-arrow-down", view: 12.0, body: r#"<path d="M5.915 2.016q-.082 .011-.149 .044-.065 .029-.132 .108-.065 .076-.097 .144-.029 .064-.029 .448v2.581q0 2.938-.012 2.938-.012 0-1.368-1.356-.984-.982-1.184-1.175-.196-.193-.269-.217-.179-.058-.366 .015-.185 .07-.27 .249-.035 .097-.035 .205v.035q0 .097 .047 .17 .085 .12 .398 .442l1.439 1.442q1.801 1.81 1.872 1.846 .108 .061 .24 .061 .132 0 .24-.061 .071-.036 1.872-1.846l1.439-1.442q.313-.322 .398-.442 .047-.073 .047-.17v-.035q0-.108-.035-.205-.085-.179-.272-.249-.185-.073-.364-.015-.073 .024-.272 .217-.197 .193-1.181 1.175-1.356 1.356-1.368 1.356-.012 0-.012-2.938v-2.546q0-.419-.023-.466-.062-.17-.217-.258-.155-.091-.337-.055z" fill="currentColor"/>"# };
 pub static ARROW_UP: Icon = Icon { name: "nerda-arrow-up", view: 12.0, body: r#"<path d="M5.868 2.016q-.073 .011-.135 .055-.058 .041-1.857 1.84l-1.427 1.453q-.313 .311-.398 .431-.047 .073-.047 .17v.035q0 .205 .155 .36 .097 .097 .24 .126 .144 .03 .276-.017 .073-.024 .275-.223 .205-.199 1.178-1.169 1.356-1.356 1.368-1.356 .012 0 .012 2.938v2.581q0 .384 .029 .457 .032 .071 .103 .144 .073 .07 .161 .114 .091 .041 .199 .041 .108 0 .196-.041 .091-.044 .161-.114 .074-.073 .103-.144 .032-.073 .032-.457v-2.581q0-2.938 .012-2.938 .012 0 1.368 1.356 .973 .97 1.175 1.169 .205 .199 .278 .223 .132 .047 .276 .017 .143-.029 .24-.126 .155-.155 .155-.36v-.035q0-.097-.047-.17-.085-.12-.398-.442l-1.439-1.442q-1.801-1.81-1.86-1.84-.059-.032-.138-.055-.079-.024-.12-.024-.041 0-.126 .024z" fill="currentColor"/>"# };
 
+/// The Sleep tab: Lucide's moon, stroked.
+pub static MOON: Icon = Icon { name: "nerda-moon", view: 24.0, body: r#"<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
+/// Keeping awake: Lucide's coffee, stroked.
+pub static COFFEE: Icon = Icon {
+    name: "nerda-coffee",
+    view: 24.0,
+    body: r#"<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v2M14 2v2M6 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/></g>"#,
+};
+
+/// The display: Lucide's monitor, stroked.
+pub static MONITOR: Icon = Icon { name: "nerda-monitor", view: 24.0, body: r#"<path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
+/// Turning the display off: Lucide's monitor-off, stroked.
+pub static MONITOR_OFF: Icon = Icon { name: "nerda-monitor-off", view: 24.0, body: r#"<path d="M17 17H4a2 2 0 0 1-2-2V5c0-1.5 1-2 1-2M22 15V5a2 2 0 0 0-2-2H9M8 21h8M12 17v4M2 2l20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
+/// A lid: Lucide's laptop, stroked.
+pub static LAPTOP_LID: Icon = Icon { name: "nerda-laptop-lid", view: 24.0, body: r#"<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2zM20.054 15.987H3.946" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
+/// Needs a password, and locking the screen: Lucide's lock, stroked.
+pub static LOCK: Icon = Icon { name: "nerda-lock", view: 24.0, body: r#"<path d="M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM7 11V7a5 5 0 0 1 10 0v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
 /// OpenAI's mark, for Codex.
 pub static OPENAI: Icon = Icon {
     name: "nerda-openai",

@@ -1,7 +1,7 @@
 //! How the panel looks: a top bar of tabs (the agents, then this Mac's measures, then Settings),
 //! the context bar of the open tab under it, and the tab's body in two columns. The panel has
-//! one size on every tab. An agent's tab is in `agents_view`, this Mac's in `system_view`, the
-//! settings in `settings_view`.
+//! one size on every tab. An agent's tab is in `agents_view`, this Mac's in `system_view`, Sleep
+//! in `sleep_view`, the settings in `settings_view`.
 
 use rune::{Color, Cx, El, col, el, row, spacer};
 
@@ -9,6 +9,7 @@ use crate::agents_view;
 use crate::icons;
 use crate::look::{BAR_H, Look, PANEL_H, PANEL_W, nav_tile};
 use crate::settings_view;
+use crate::sleep_view;
 use crate::system_view;
 use crate::ui::{self, Page, SHADOW_ROOM, Tab, Ui};
 
@@ -28,6 +29,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let screen = match (s.page, s.tab) {
         (Page::Settings, _) => settings_view::screen(s, &l),
         (_, tab) if tab.provider().is_some() => agents_view::screen(s, &l),
+        (_, Tab::Sleep) => sleep_view::screen(s, &l),
         (_, tab) => system_view::screen(s, &l, tab),
     };
 
@@ -85,6 +87,13 @@ fn top_bar(s: &Ui, l: &Look) -> El {
         let shortcut = s.shortcut(tab);
         bar = bar.child(nav_tile(l, tab_key(tab), tab.icon(), tab.label(), shortcut.as_deref(), on_tab && s.tab == tab).on_press_tx(move |s: &mut Ui, tx| ui::set_tab(s, tab, tx)));
     }
+    // Sleep is a control, not a measure: a hairline of its own sets it apart.
+    if s.config.sleep.tab {
+        let shortcut = s.shortcut(Tab::Sleep);
+        bar = bar
+            .child(el().key("sleep-separator").size(1.0, 16.0).mx(4.0).fill(l.track))
+            .child(nav_tile(l, "tab-sleep", &icons::MOON, "Sleep", shortcut.as_deref(), on_tab && s.tab == Tab::Sleep).on_press_tx(|s: &mut Ui, tx| ui::set_tab(s, Tab::Sleep, tx)));
+    }
     bar.child(spacer()).child(nav_tile(l, "tab-settings", &icons::SETTINGS_2, "Settings", Some("⌘,"), s.page == Page::Settings).on_press_tx(ui::toggle_settings))
 }
 
@@ -96,6 +105,7 @@ fn tab_key(tab: Tab) -> &'static str {
         Tab::Network => "tab-network",
         Tab::Battery => "tab-battery",
         Tab::Gpu => "tab-gpu",
+        Tab::Sleep => "tab-sleep",
         Tab::Claude | Tab::Codex | Tab::DeepSeek => "tab-agents",
     }
 }

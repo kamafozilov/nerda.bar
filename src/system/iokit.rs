@@ -38,6 +38,10 @@ unsafe extern "C" {
     fn CFStringGetCString(string: CFTypeRef, buffer: *mut c_char, size: CFIndex, encoding: u32) -> bool;
     fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
     fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
+    fn CFDictionaryGetCount(dict: CFTypeRef) -> CFIndex;
+    fn CFDictionaryGetKeysAndValues(dict: CFTypeRef, keys: *mut CFTypeRef, values: *mut CFTypeRef);
+    fn CFDateGetTypeID() -> usize;
+    fn CFDateGetAbsoluteTime(date: CFTypeRef) -> f64;
 }
 
 #[link(name = "IOKit", kind = "framework")]
@@ -51,6 +55,19 @@ unsafe extern "C" {
     fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
     fn IOPSCopyPowerSourcesList(blob: CFTypeRef) -> CFTypeRef;
     fn IOPSGetPowerSourceDescription(blob: CFTypeRef, source: CFTypeRef) -> CFTypeRef;
+    fn IOPSGetProvidingPowerSourceType(blob: CFTypeRef) -> CFTypeRef;
+    fn IOPMAssertionCreateWithDescription(
+        kind: CFTypeRef,
+        name: CFTypeRef,
+        details: CFTypeRef,
+        reason: CFTypeRef,
+        bundle: CFTypeRef,
+        timeout: f64,
+        timeout_action: CFTypeRef,
+        id: *mut u32,
+    ) -> libc::kern_return_t;
+    fn IOPMAssertionRelease(id: u32) -> libc::kern_return_t;
+    fn IOPMCopyAssertionsByProcess(by_process: *mut CFTypeRef) -> libc::kern_return_t;
 }
 
 /// A CoreFoundation object made by a `Create` or `Copy` call, released when dropped.
@@ -153,26 +170,93 @@ impl<'a> Dict<'a> {
     }
 
     pub(super) fn string(&self, name: &str) -> Option<String> {
-        let value = self.get(name);
-        if !is(value, CFStringGetTypeID) {
-            return None;
-        }
-        // SAFETY: `value` is a CFString; the buffer is sized for its longest UTF-8 form plus
-        // the terminating nul, and CoreFoundation writes at most that many bytes.
-        unsafe {
-            let size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(value), UTF8) + 1;
-            let mut buffer = vec![0u8; size.max(1) as usize];
-            if !CFStringGetCString(value, buffer.as_mut_ptr() as *mut c_char, buffer.len() as CFIndex, UTF8) {
-                return None;
-            }
-            CStr::from_bytes_until_nul(&buffer).ok()?.to_str().ok().map(str::to_owned)
-        }
+        string(self.get(name))
     }
 
     /// A dictionary nested under `name`, living as long as this one.
     pub(super) fn dict(&self, name: &str) -> Option<Dict<'a>> {
         Dict::borrow(self.get(name))
     }
+}
+
+impl<'a> Dict<'a> {
+    /// A date, as Unix seconds.
+    pub(super) fn date(&self, name: &str) -> Option<f64> {
+        let value = self.get(name);
+        // SAFETY: `value` is a CFDate.
+        is(value, CFDateGetTypeID).then(|| unsafe { CFDateGetAbsoluteTime(value) } + SINCE_2001)
+    }
+
+    /// The entries keyed by a number (the assertions, keyed by pid), each with the
+    /// dictionaries in the array it holds.
+    pub(super) fn arrays_by_number(&self) -> Vec<(i64, Vec<Dict<'a>>)> {
+        // SAFETY: `self.raw` is a live CFDictionary.
+        let count = unsafe { CFDictionaryGetCount(self.raw) }.max(0) as usize;
+        let (mut keys, mut values) = (vec![std::ptr::null(); count], vec![std::ptr::null(); count]);
+        // SAFETY: both buffers hold `count` entries; the keys and values are not retained and
+        // live as long as the dictionary.
+        unsafe { CFDictionaryGetKeysAndValues(self.raw, keys.as_mut_ptr(), values.as_mut_ptr()) };
+        keys.into_iter()
+            .zip(values)
+            .filter_map(|(key, value)| {
+                let number = number_i64(key)?;
+                is(value, CFArrayGetTypeID).then(|| {
+                    // SAFETY: `value` is a live CFArray; its items live as long as it does.
+                    let len = unsafe { CFArrayGetCount(value) };
+                    (number, (0..len).filter_map(|at| Dict::borrow(unsafe { CFArrayGetValueAtIndex(value, at) })).collect())
+                })
+            })
+            .collect()
+    }
+}
+
+/// A CFString's text, borrowed from whoever owns it.
+fn string(value: CFTypeRef) -> Option<String> {
+    if !is(value, CFStringGetTypeID) {
+        return None;
+    }
+    // SAFETY: `value` is a CFString; the buffer is sized for its longest UTF-8 form plus the
+    // terminating nul, and CoreFoundation writes at most that many bytes.
+    unsafe {
+        let size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(value), UTF8) + 1;
+        let mut buffer = vec![0u8; size.max(1) as usize];
+        if !CFStringGetCString(value, buffer.as_mut_ptr() as *mut c_char, buffer.len() as CFIndex, UTF8) {
+            return None;
+        }
+        CStr::from_bytes_until_nul(&buffer).ok()?.to_str().ok().map(str::to_owned)
+    }
+}
+
+/// CoreFoundation counts dates from 2001; Unix from 1970.
+const SINCE_2001: f64 = 978_307_200.0;
+
+/// Holds an assertion of `kind` (`PreventUserIdleDisplaySleep`, `PreventUserIdleSystemSleep`)
+/// that macOS lets go of by itself after `timeout` seconds, or never with 0. `None` when it
+/// was refused.
+pub(super) fn assert_awake(kind: &str, name: &str, reason: &str, timeout: f64) -> Option<u32> {
+    let (kind, name, reason, release) = (key(kind)?, key(name)?, key(reason)?, key("TimeoutActionRelease")?);
+    let mut id = 0u32;
+    // SAFETY: every string is a live CFString; `id` receives the assertion's id.
+    let status = unsafe { IOPMAssertionCreateWithDescription(kind.0, name.0, std::ptr::null(), reason.0, std::ptr::null(), timeout.max(0.0), release.0, &mut id) };
+    (status == libc::KERN_SUCCESS && id != 0).then_some(id)
+}
+
+/// Lets go of an assertion [`assert_awake`] made. Releasing one that already timed out is
+/// harmless.
+pub(super) fn release_awake(id: u32) {
+    // SAFETY: releasing an id is valid whether or not it is still held.
+    unsafe { IOPMAssertionRelease(id) };
+}
+
+/// Every process's assertions, keyed by pid.
+pub(super) fn assertions_by_process() -> Option<Owned> {
+    let mut out: CFTypeRef = std::ptr::null();
+    // SAFETY: on success `out` is a copy for us to release.
+    let status = unsafe { IOPMCopyAssertionsByProcess(&mut out) };
+    if status != libc::KERN_SUCCESS {
+        return None;
+    }
+    Owned::new(out)
 }
 
 /// One IOKit service, released when dropped.
@@ -254,6 +338,13 @@ impl PowerSources {
         let blob = Owned::new(unsafe { IOPSCopyPowerSourcesInfo() })?;
         let list = Owned::new(unsafe { IOPSCopyPowerSourcesList(blob.0) })?;
         is(list.0, CFArrayGetTypeID).then_some(PowerSources { blob, list })
+    }
+
+    /// Where the power comes from now: "AC Power", "Battery Power" or "UPS Power".
+    pub(super) fn providing(&self) -> Option<String> {
+        // SAFETY: `self.blob` is live; the string returned is not retained and lives with it.
+        let kind = unsafe { IOPSGetProvidingPowerSourceType(self.blob.0) };
+        string(kind)
     }
 
     /// Each source's description, living as long as these sources.

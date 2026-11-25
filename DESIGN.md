@@ -182,8 +182,8 @@ An instrument panel under the menu bar: one fixed 760×640 panel, read in a few 
 
 Structure, top to bottom:
 
-1. **Top bar (48pt):** icon-only tabs. Agents, a hairline, CPU, Memory, Disk, Network, Battery, GPU; Settings at the trailing end. A Mac without a battery has no Battery tab.
-2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. The plan's line adds when it renews ("Ultra plan · Renews 22 Nov, 21:47"), ends (in the warning colour) or is paid until, with the full date and time on hover. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Settings: the version and Quit.
+1. **Top bar (48pt):** icon-only tabs. Agents, a hairline, CPU, Memory, Disk, Network, Battery, GPU, a hairline, Sleep; Settings at the trailing end. A Mac without a battery has no Battery tab.
+2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. The plan's line adds when it renews ("Ultra plan · Renews 22 Nov, 21:47"), ends (in the warning colour) or is paid until, with the full date and time on hover. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Sleep: the power source and its idle timers, with "Kept awake · 42m left" (green), "Sleep is off" (amber) or how many apps keep it awake at the end. In Settings: the version and Quit.
 3. **Body:** two columns of 380pt, divided by a hairline, each a stack of sections.
 
 ## Colors
@@ -239,9 +239,11 @@ States every tab must cover:
 - **Stale or failed:** the banner, the last-update time in `warning`, and the limits' "As of" time.
 - **Empty:** a dashed card with what is missing and when it appears ("No Claude Code messages today yet"); an empty list says what will fill it.
 - **No agents:** a centred card listing each provider with how to sign in and a Check again or Add key button.
-- **Absent hardware:** no Battery tab; its Settings row says "This Mac has no battery".
+- **Absent hardware:** no Battery tab; its Settings row says "This Mac has no battery". On Sleep, a Mac without a battery shows the power adapter's timers alone, and one without a lid has no lid switch or lid row.
 
-Keyboard: ⌘1 Agents, ⌘2–⌘7 the Mac tabs in order, ⌘⇧[ and ⌘⇧] the previous and next provider, ⌘R refresh, ⌘, Settings, ⌘Q quit, Esc closes.
+The Sleep tab: on the left, Keep awake (a 72pt ring of the time left beside the headline, then the durations as one segmented control across the column), While kept awake (a card of 52pt switch rows: display, lid) and Keeping it awake (an app list that fills the rest); on the right, When idle (the source's segments in the title, 36pt rows of timer choices and switches, a lock caption: changes ask for a password), Lid and wake (32pt rows, as many as fit) and Now (three equal buttons). Sleep left off by an earlier run, or a change that failed, is the banner.
+
+Keyboard: ⌘1 Agents, ⌘2–⌘8 the Mac tabs and Sleep in order, ⌘⇧[ and ⌘⇧] the previous and next provider, ⌘R refresh, ⌘, Settings, ⌘Q quit, Esc closes.
 
 ## Do's and Don'ts
 
