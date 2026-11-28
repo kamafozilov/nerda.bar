@@ -70,7 +70,7 @@ fn session_cookie() -> Option<(u32, Vec<u8>)> {
 }
 
 fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
-    (hex.len() % 2 == 0).then_some(())?;
+    hex.len().is_multiple_of(2).then_some(())?;
     (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok()).collect()
 }
 

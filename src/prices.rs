@@ -118,7 +118,7 @@ impl Prices {
         if std::fs::create_dir_all(dir).is_ok()
             && let Ok(text) = serde_json::to_string(&prices)
         {
-            let _ = std::fs::write(dir.join(FILE), text);
+            let _ = crate::config::write_file(dir, FILE, &text);
         }
         Ok(prices)
     }

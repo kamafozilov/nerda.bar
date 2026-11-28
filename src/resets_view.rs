@@ -57,7 +57,9 @@ pub fn section(s: &Ui, l: &Look, snapshot: &Snapshot, resets: &Resets) -> (El, f
         let count = kind.credits.len();
         let expires = kind.expires.map(|at| format!("{} {}", if count > 1 && kind.same_expiry { "All expire" } else { "Expires" }, time::day_clock(at, s.now)));
         let second = match (kind.description, expires) {
-            (Some(description), Some(expires)) => format!("{description} · {expires}"),
+            // The expiry leads: when the line is too long, what it loses is the description,
+            // which the title already says in short.
+            (Some(description), Some(expires)) => format!("{expires} · {description}"),
             (Some(words), None) => words.to_owned(),
             (None, Some(words)) => words,
             (None, None) => String::new(),

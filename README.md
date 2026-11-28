@@ -84,7 +84,7 @@ Claude's limit resets ("Reset for free") can only be used in Claude's own apps, 
 
 DeepSeek reports only the account's balance. The tab shows it split into topped-up and granted credit, how long it lasts at last week's spend, and the spend per day, read from how the balance fell between refreshes; a rise is a top-up.
 
-The key is kept in the Keychain. Add it with **+** on the Agents tab: paste it and press Add, and Nerda Bar saves it to the Keychain item "Nerda Bar" without it ever showing on a command line. In a terminal it is the same item (the command asks for the key, so it never lands in your shell history):
+The key is kept in the Keychain. Add it with **+** on the Agents tab: paste it and press Add, and Nerda Bar saves it to the Keychain item "Nerda Bar" without it ever showing on a command line. Settings › DeepSeek options replaces it with another or removes it, after asking; a removed or replaced key takes the balance's history with it. In a terminal it is the same item (the command asks for the key, so it never lands in your shell history):
 
 ```sh
 security add-generic-password -s "Nerda Bar" -a deepseek -w
@@ -119,18 +119,24 @@ security add-generic-password -s "Nerda Bar" -a deepseek -w
 
 The Sleep tab keeps this Mac from sleeping and shows what else does.
 
-- **Keep awake** for 15 minutes, 30 minutes, 1, 2 or 5 hours, or with **No limit** until you turn it off. The ring counts down the time left. While it runs, a cup in the menu bar shows the time left; a click opens the tab, and its menu has Stop Keeping Awake.
-- **While kept awake**: keep the display on too, or let it turn off while apps keep running. On a notebook, **Stay awake with the lid closed** asks for your password when it starts.
-- **Keeping it awake**: the apps that stop this Mac sleeping now, the longest first, each with how long it has. An app that runs `caffeinate` shows as itself.
-- **When idle**: when the display turns off and when the Mac sleeps, Low Power Mode, Wake for network access and Power Nap, for the battery and the power adapter apart. A change asks for your password.
+The line beside its title says what this Mac will do now, with everything counted in: "Now: stays awake until 15:33; closing the lid still sleeps it", "Now: won't sleep while Terminal and 3 more apps keep it awake", "Now: sleeps after 15 min idle on battery". The left column is what is temporary and needs no password; the right one is macOS's own settings, which stay until you change them.
+
+- **Keep awake** for 15 minutes, 30 minutes, 1, 2 or 5 hours, or with **No limit** until you pick Off. The ring counts down the time left, and the line under it says when it ends and what happens then. While it runs, a cup in the menu bar shows the time left; a click opens the tab, and its menu has Stop Keeping Awake.
+- **Keep-awake options** apply to the keep-awake running now, or to the next one: keep the display on too, or let it turn off while the Mac keeps working. On a notebook, **Stay awake with the lid closed** asks for your password when it starts. Each switch says under its name what it does as it stands.
+- **Also keeping it awake**: the other apps that stop this Mac sleeping now, the longest first, each with how long it has. An app that runs `caffeinate` shows as itself.
+- **When idle**: when the display turns off and when the Mac sleeps, Low Power Mode, Wake for network access and Power Nap, for the battery and the power adapter apart. These are permanent macOS settings; a change asks for your password.
 - **Lid and wake**: whether closing the lid sleeps the Mac, and when it last woke and slept.
-- **Now**: turn the display off, sleep, or lock the screen.
+- **Right now**: turn the display off, sleep, or lock the screen. Each acts at once.
 
 <br clear="right">
 
 ### The menu bar
 
-Each provider has an item with its mark. Claude's shows the limit the settings pick and, with model limits on, each model's own limit beside it by name: `Weekly 59%  Fable 42%`, or on a plan with a session `Session 24%  Fable 42%`. Codex shows its 5-hour or weekly limit, and DeepSeek its balance. Numbers turn orange at 30% left and red at 10%, and dim when they could not be refreshed. Codex and DeepSeek add their items once they are signed in.
+Each provider has an item with its mark. Claude's and Codex's show the limit the settings pick and, with model limits on, each model's own limit beside it by name: `Weekly 59%  Fable 42%`, or on a plan with a session `Session 24%  Fable 42%`. DeepSeek's shows its balance, which can turn orange under an amount you pick. Numbers turn orange at 30% left and red at 10%, and dim when they could not be refreshed. Codex and DeepSeek add their items once they are signed in.
+
+A secondary click on an item opens its menu, which acts on that item's own provider: Refresh, and Show Used Instead of Left for Claude and Codex.
+
+**Every agent is yours to arrange.** Settings lists Claude, Codex and DeepSeek, each with a switch for its menu bar item and one for its tab in the panel, and under them the options of the agent you pick: which limit the menu bar shows, whether percentages read as left or used, whether model limits show beside it, and for DeepSeek its API key (Replace, Remove) and the balance under which it warns. An agent with no menu bar item and no tab is not asked for anything. Switch every item off and Nerda Bar keeps one of its own in the menu bar, so the panel is always a click away.
 
 ### Keys
 
@@ -150,26 +156,32 @@ Each provider has an item with its mark. Claude's shows the limit the settings p
 - **Codex's limits** are what ChatGPT reports for the Codex CLI's login (`chatgpt.com/backend-api/wham/usage`), read from `~/.codex/auth.json` (or its Keychain item) and never renewed. Free resets are listed from the same service; one is spent only when you confirm it in the panel.
 - **When the plan renews** shows beside the plan. Claude's comes from claude.ai's billing (`claude.ai/api/organizations/<org>/subscription_details`), asked every 6 hours with the session the Claude desktop app keeps in its cookies. Those cookies are encrypted with the desktop app's Keychain item "Claude Safe Storage", so macOS asks once whether Nerda Bar may read it. Say no and it isn't asked again until Nerda Bar relaunches; without the desktop app signed in, nothing is asked and no date shows. A cancelled plan shows when it ends. Codex's is the paid-until date in the CLI's login (`chatgpt_subscription_active_until`).
 - **DeepSeek's balance** is `api.deepseek.com/user/balance`, with your key.
-- Limits refresh every 5 minutes and when the panel opens, never more often than once a minute.
+- Limits refresh every 5 minutes (10, 15 or 30 in the settings) and when the panel opens, never more often than once a minute.
 - **The limit chart** draws what each refresh read, kept for 8 days (`history.json`, `codex-history.json`). Where there are no readings, what the limit gained is spread over its hours by this Mac's activity and drawn paler as an estimate.
-- **Usage** is counted from the session logs: Claude Code's under `~/.claude/projects`, each message once; the Codex CLI's under `~/.codex/sessions`, each response once. **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day.
-- **This Mac** is read from macOS itself, as Activity Monitor reads it: CPU ticks and memory pages from the kernel, disk and GPU statistics and the battery from IOKit, volumes from the file system, traffic from each interface's counters and its name from the network settings. None of it needs a password. Measures are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the history needs them, and not at all with every tab and item off. The battery's charge is kept for a week in `battery.json`; the rest of the history is kept in memory.
+- **Usage** is counted from the session logs: Claude Code's under `~/.claude/projects`, each message once, with the requests an advisor model answered for it counted under that model; the Codex CLI's under `~/.codex/sessions` and `~/.codex/archived_sessions`, compressed sessions too, each response once. The logs are read a few megabytes at a time, however large they are. **Prices** are the API prices from [models.dev](https://models.dev), fetched once a day.
+- **This Mac** is read from macOS itself, as Activity Monitor reads it: CPU ticks and memory pages from the kernel, disk and GPU statistics and the battery from IOKit, volumes from the file system, traffic from each interface's counters and its name from the network settings. None of it needs a password. Measures are read every second while the panel shows them, every 2 seconds while the menu bar does, every 20 seconds while only the history needs them, and not at all with every tab and item off. A measure with no menu bar item of its own is read every 20 seconds even while another's item is read every 2. The battery's charge is kept for a week in `battery.json`; the rest of the history is kept in memory.
 
-- **Sleep** is read from macOS too: the idle timers from `pmset -g custom`, the apps keeping the Mac awake from the power assertions they hold, the lid and the last wake from IOKit, and when it slept and woke from the kernel. They are read when the tab opens and every 15 seconds while it shows. **Keep awake** is a power assertion, as `caffeinate` makes, which needs no password; macOS lets go of it when its time is up or Nerda Bar quits. Changing an idle timer runs `pmset` after macOS's password dialog. **Staying awake with the lid closed** turns sleep off (`pmset disablesleep 1`) after the same dialog, and starts a watcher that turns it back on as soon as the keep-awake ends or Nerda Bar quits or crashes. If the Mac is shut down while it is on, the tab says sleep is still off and offers to turn it back on.
+- **Sleep** is read from macOS too: the idle timers from `pmset -g custom`, the apps keeping the Mac awake from the power assertions they hold, the lid and the last wake from IOKit, and when it slept and woke from the kernel. They are read when the tab opens and every 15 seconds while it shows. **Keep awake** is a power assertion, as `caffeinate` makes, which needs no password; macOS lets go of it when its time is up or Nerda Bar quits. Changing an idle timer runs `pmset` after macOS's password dialog. **Staying awake with the lid closed** turns sleep off (`pmset disablesleep 1`) after the same dialog, and starts a watcher that turns it back on as soon as the keep-awake ends, Nerda Bar quits or crashes, or the Mac shuts down or restarts. Whenever sleep is off with no keep-awake asking for that, the tab says so and offers to turn it back on, and the menu bar says "Sleep off" when an earlier run left it so.
 
 None of it leaves your Mac, except each provider's own request to its own service.
 
 ## Settings
 
-The panel's settings cover all but the last two of these. Everything lives in `~/Library/Application Support/nerda.bar/config.json`, read at launch:
+The panel's settings cover all of these. Everything lives in `~/Library/Application Support/nerda.bar/config.json`, read at launch and again when the panel opens after the file was edited. A file that doesn't parse is kept beside it as `config.invalid.json`, so nothing typed there is lost.
 
 ```json
 {
   "menu_bar": "session",
   "menu_bar_models": true,
   "show_used": false,
-  "codex": { "menu_bar": "session", "show_used": false },
-  "deepseek_menu_bar": true,
+  "codex": { "menu_bar": "session", "show_used": false, "models": false },
+  "claude_in_menu_bar": true,
+  "claude_tab": true,
+  "codex_in_menu_bar": true,
+  "codex_tab": true,
+  "deepseek_in_menu_bar": true,
+  "deepseek_tab": true,
+  "deepseek_warn_below": 0,
   "cpu": { "menu_bar": "off", "tab": true },
   "memory": { "menu_bar": "off", "tab": true },
   "disk": { "menu_bar": "off", "tab": true },
@@ -182,7 +194,7 @@ The panel's settings cover all but the last two of these. Everything lives in `~
 }
 ```
 
-`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left); a plan without a session limit shows the weekly one. `menu_bar_models` adds each model's own limit beside it. Each measure says how its menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has its tab. `sleep` says whether the Sleep tab shows, whether a keep-awake has its cup in the menu bar, and whether it keeps the display on and the Mac awake with the lid closed. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
+`menu_bar` is `session`, `weekly` or `lowest` (the plan-wide limit with the least left); a plan without a session limit shows the weekly one. `menu_bar_models` adds each model's own limit beside it; `codex` holds the same three for Codex. `<agent>_in_menu_bar` and `<agent>_tab` say whether each agent has its menu bar item and its tab (`deepseek_menu_bar`, the first name of DeepSeek's, still reads). `deepseek_warn_below` is the balance under which DeepSeek's item turns orange, 0 for never. Each measure says how its menu bar item shows, `off`, `text`, `ring` or `graph`, and whether the panel has its tab. `sleep` says whether the Sleep tab shows, whether a keep-awake has its cup in the menu bar, and whether it keeps the display on and the Mac awake with the lid closed. `refresh_minutes` is at least 5. `material` is `popover` (frosted vibrancy) or `glass` (Liquid Glass on macOS 26 and later).
 
 ## Build it yourself
 

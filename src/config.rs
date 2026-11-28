@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::MenuBarMetric;
+use crate::model::{MenuBarMetric, Provider};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,8 +18,20 @@ pub struct Config {
     pub show_used: bool,
     /// What Codex's menu bar item shows.
     pub codex: ProviderBar,
-    /// Whether DeepSeek's balance has an item in the menu bar.
-    pub deepseek_menu_bar: bool,
+    /// Whether Claude has an item in the menu bar, and a tab in the panel. An agent with
+    /// neither is not asked for anything.
+    pub claude_in_menu_bar: bool,
+    pub claude_tab: bool,
+    pub codex_in_menu_bar: bool,
+    pub codex_tab: bool,
+    /// Whether DeepSeek's balance has an item in the menu bar. It was first written as
+    /// `deepseek_menu_bar`, which still reads.
+    #[serde(alias = "deepseek_menu_bar")]
+    pub deepseek_in_menu_bar: bool,
+    pub deepseek_tab: bool,
+    /// DeepSeek's balance reads as a warning under this amount, in its own currency; 0 never
+    /// warns.
+    pub deepseek_warn_below: f64,
     /// Minutes between refreshes. Anthropic allows about 30 requests an hour, shared with
     /// Claude Code, so under 5 is not accepted.
     pub refresh_minutes: u32,
@@ -65,6 +77,8 @@ impl Default for SleepConfig {
 pub struct ProviderBar {
     pub menu_bar: MenuBarMetric,
     pub show_used: bool,
+    /// Also show each model's own limit beside it.
+    pub models: bool,
 }
 
 /// How one of this Mac's measures shows: its menu bar item, and its tab in the panel.
@@ -115,7 +129,13 @@ impl Default for Config {
             menu_bar_models: true,
             show_used: false,
             codex: ProviderBar::default(),
-            deepseek_menu_bar: true,
+            claude_in_menu_bar: true,
+            claude_tab: true,
+            codex_in_menu_bar: true,
+            codex_tab: true,
+            deepseek_in_menu_bar: true,
+            deepseek_tab: true,
+            deepseek_warn_below: 0.0,
             refresh_minutes: 5,
             material: "popover".to_owned(),
             cpu: Module::default(),
@@ -129,10 +149,52 @@ impl Default for Config {
     }
 }
 
+/// The refresh intervals the settings offer, in minutes.
+pub const REFRESH_CHOICES: [u32; 4] = [5, 10, 15, 30];
+
 impl Config {
     /// Seconds between refreshes.
     pub fn refresh_seconds(&self) -> i64 {
         self.refresh_minutes.clamp(5, 120) as i64 * 60
+    }
+
+    /// Whether `provider` has an item in the menu bar.
+    pub fn in_menu_bar(&self, provider: Provider) -> bool {
+        match provider {
+            Provider::Claude => self.claude_in_menu_bar,
+            Provider::Codex => self.codex_in_menu_bar,
+            Provider::DeepSeek => self.deepseek_in_menu_bar,
+        }
+    }
+
+    /// Whether `provider` has a tab in the panel.
+    pub fn has_tab(&self, provider: Provider) -> bool {
+        match provider {
+            Provider::Claude => self.claude_tab,
+            Provider::Codex => self.codex_tab,
+            Provider::DeepSeek => self.deepseek_tab,
+        }
+    }
+
+    /// Whether `provider` shows anywhere: one that doesn't is not read.
+    pub fn shows(&self, provider: Provider) -> bool {
+        self.in_menu_bar(provider) || self.has_tab(provider)
+    }
+
+    pub fn set_in_menu_bar(&mut self, provider: Provider, on: bool) {
+        *match provider {
+            Provider::Claude => &mut self.claude_in_menu_bar,
+            Provider::Codex => &mut self.codex_in_menu_bar,
+            Provider::DeepSeek => &mut self.deepseek_in_menu_bar,
+        } = on;
+    }
+
+    pub fn set_tab(&mut self, provider: Provider, on: bool) {
+        *match provider {
+            Provider::Claude => &mut self.claude_tab,
+            Provider::Codex => &mut self.codex_tab,
+            Provider::DeepSeek => &mut self.deepseek_tab,
+        } = on;
     }
 }
 
@@ -146,15 +208,17 @@ pub fn data_dir() -> PathBuf {
 }
 
 /// Reads `dir/config.json`, writing the defaults there when it's missing. A file that doesn't
-/// parse is left alone and the defaults are used.
+/// parse is kept beside it as `config.invalid.json` and the defaults are used: the next
+/// change made in the panel writes `config.json` whole, and would otherwise be the end of
+/// what was typed there.
 pub fn load(dir: &Path) -> Config {
-    let path = dir.join("config.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("nerda-bar: {} is not valid, using defaults: {e}", path.display());
+    match read(dir) {
+        Some(Ok(config)) => config,
+        Some(Err(reason)) => {
+            eprintln!("nerda-bar: {} is not valid, using defaults (kept as config.invalid.json): {reason}", dir.join("config.json").display());
             Config::default()
-        }),
-        Err(_) => {
+        }
+        None => {
             let config = Config::default();
             save(dir, &config);
             config
@@ -162,14 +226,37 @@ pub fn load(dir: &Path) -> Config {
     }
 }
 
+/// `dir/config.json` as it is now: `None` when there is none, `Err` when it doesn't parse, in
+/// which case a copy is kept as `config.invalid.json`.
+pub fn read(dir: &Path) -> Option<Result<Config, String>> {
+    let text = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    Some(serde_json::from_str(&text).map_err(|e| {
+        let _ = write_file(dir, "config.invalid.json", &text);
+        e.to_string()
+    }))
+}
+
+/// When `dir/config.json` was last written, by this app or by hand.
+pub fn modified(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir.join("config.json")).and_then(|meta| meta.modified()).ok()
+}
+
 /// Writes `dir/config.json`.
 pub fn save(dir: &Path, config: &Config) {
-    if std::fs::create_dir_all(dir).is_ok()
-        && let Ok(text) = serde_json::to_string_pretty(config)
-        && let Err(e) = std::fs::write(dir.join("config.json"), text + "\n")
+    if let Ok(text) = serde_json::to_string_pretty(config)
+        && let Err(e) = write_file(dir, "config.json", &(text + "\n"))
     {
         eprintln!("nerda-bar: can't save settings: {e}");
     }
+}
+
+/// Writes `dir/name` whole or not at all: the text goes to a file beside it, which then takes
+/// its name. A crash or a power cut mid-write leaves the earlier file, never half of this one.
+pub fn write_file(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let partial = dir.join(format!(".{name}.part"));
+    std::fs::write(&partial, text)?;
+    std::fs::rename(&partial, dir.join(name))
 }
 
 #[cfg(test)]
@@ -196,5 +283,44 @@ mod tests {
     fn refreshes_are_never_faster_than_five_minutes() {
         let config: Config = serde_json::from_str(r#"{"refresh_minutes": 1}"#).unwrap();
         assert_eq!(config.refresh_seconds(), 300);
+    }
+
+    /// The settings file of an install from before every agent could be switched: each key
+    /// keeps its meaning, and the new ones take their defaults.
+    #[test]
+    fn an_earlier_versions_file_reads_as_it_was() {
+        let text = r#"{"menu_bar": "session", "menu_bar_models": true, "show_used": false, "codex": {"menu_bar": "session", "show_used": false},
+            "deepseek_menu_bar": false, "refresh_minutes": 5, "material": "popover", "cpu": {"menu_bar": "off", "tab": true},
+            "memory": {"menu_bar": "text", "tab": true}, "sleep": {"tab": true, "menu_bar": true, "display": true, "lid": false}}"#;
+        let config: Config = serde_json::from_str(text).unwrap();
+        assert!(!config.deepseek_in_menu_bar, "DeepSeek's item stays off under its first name");
+        assert!(config.claude_in_menu_bar && config.codex_in_menu_bar && config.claude_tab && config.codex_tab && config.deepseek_tab);
+        assert_eq!(config.memory.menu_bar, MenuStyle::Text);
+        assert!(!config.codex.models);
+        // Written back, it reads the same.
+        let again: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(again, config);
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_kept_and_not_lost() {
+        let dir = std::env::temp_dir().join(format!("nerda-bar-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let typed = r#"{"menu_bar": "weekly", "cpu": {"menu_bar": "Ring"},}"#;
+        std::fs::write(dir.join("config.json"), typed).unwrap();
+        assert_eq!(load(&dir), Config::default());
+        save(&dir, &Config::default());
+        assert_eq!(std::fs::read_to_string(dir.join("config.invalid.json")).unwrap(), typed, "what was typed is still there");
+        assert_eq!(read(&dir), Some(Ok(Config::default())));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_that_shows_nowhere_is_not_read() {
+        let mut config = Config::default();
+        config.set_in_menu_bar(Provider::Codex, false);
+        assert!(config.shows(Provider::Codex), "its tab still shows it");
+        config.set_tab(Provider::Codex, false);
+        assert!(!config.shows(Provider::Codex) && config.shows(Provider::Claude));
     }
 }

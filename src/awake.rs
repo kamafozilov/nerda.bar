@@ -13,11 +13,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rune::Tx;
 
-use crate::config;
 use crate::status_item;
 use crate::system::power::{self, Hold, PowerView, Setting, Source};
 use crate::time;
 use crate::ui::{self, Page, Phase, Tab, Ui};
+
+/// The longest the lid's watcher takes to turn sleep back on once its flag is gone, with room.
+const SETTLE_SECONDS: i64 = 5;
 
 /// What the durations offer, in minutes: 0 keeps the Mac awake until it is turned off.
 pub const DURATIONS: [(u32, &str); 6] = [(15, "15m"), (30, "30m"), (60, "1h"), (120, "2h"), (300, "5h"), (0, "No limit")];
@@ -64,6 +66,9 @@ pub struct Awake {
     /// An earlier run turned sleep off for the lid and couldn't turn it back on (the Mac was
     /// shut down with it on): this Mac sleeps for nothing until it is.
     pub left_off: bool,
+    /// When this app last let go of the lid, in Unix seconds: its watcher takes a moment to
+    /// turn sleep back on, and until then sleep being off is no cause for alarm.
+    lid_released: Option<i64>,
     /// Counts sessions, so a minute's tick for one that ended does nothing.
     generation: Arc<AtomicU64>,
 }
@@ -104,12 +109,21 @@ impl Awake {
         self.session.as_ref().and_then(|session| session.until).map(|until| (until - now).max(0))
     }
 
+    /// Whether sleep is off with nothing of this app's asking for that: an earlier run left it
+    /// so, or it was turned off elsewhere. The Mac then sleeps for nothing, its lid included,
+    /// until it is turned back on.
+    pub fn sleep_stuck_off(&self, now: i64) -> bool {
+        let ours = self.session.as_ref().is_some_and(|session| session.lid != LidHold::Off);
+        let settling = self.lid_released.is_some_and(|at| (0..SETTLE_SECONDS).contains(&(now - at)));
+        !ours && !settling && (self.left_off || self.view.as_ref().is_some_and(|view| view.sleep_disabled))
+    }
+
     /// The source whose timers show.
     pub fn shown_source(&self) -> Source {
         let view = self.view.as_deref();
         match self.source {
             Some(Source::Battery) if view.is_some_and(|v| v.battery.is_some()) => Source::Battery,
-            Some(source) if source == Source::Adapter => Source::Adapter,
+            Some(Source::Adapter) => Source::Adapter,
             _ => view.map_or(Source::Adapter, PowerView::source),
         }
     }
@@ -136,8 +150,8 @@ pub fn start(s: &mut Ui, minutes: u32) {
             Some(lid @ (LidHold::On | LidHold::Asking)) => set_lid_hold(s, lid),
             _ => ask_lid(s),
         }
-    } else if lid_was.is_some_and(|lid| lid != LidHold::Off) && !s.demo {
-        power::release_lid(&lid_flag(s));
+    } else if lid_was.is_some_and(|lid| lid != LidHold::Off) {
+        release_lid(s);
     }
     if let Some(until) = until {
         tick_until(s, generation, until);
@@ -156,9 +170,8 @@ fn end(s: &mut Ui) {
     s.awake.generation.fetch_add(1, Ordering::SeqCst);
     if let Some(session) = s.awake.session.take()
         && session.lid != LidHold::Off
-        && !s.demo
     {
-        power::release_lid(&lid_flag(s));
+        release_lid(s);
     }
     read_soon(s);
     sync_item(s);
@@ -198,14 +211,38 @@ pub fn set_lid(s: &mut Ui, on: bool) {
     match (on, lid) {
         (true, LidHold::Off) => ask_lid(s),
         (false, LidHold::On | LidHold::Asking) => {
-            if !s.demo {
-                power::release_lid(&lid_flag(s));
-            }
+            release_lid(s);
             set_lid_hold(s, LidHold::Off);
             read_soon(s);
         }
         _ => {}
     }
+}
+
+/// Lets go of the lid: the watcher turns sleep back on within a couple of seconds, and the
+/// tab reads again once it has.
+fn release_lid(s: &mut Ui) {
+    if s.demo {
+        if let Some(view) = &mut s.awake.view {
+            Arc::make_mut(view).sleep_disabled = false;
+        }
+        return;
+    }
+    power::release_lid(&lid_flag(s));
+    s.awake.lid_released = Some(time::unix_now());
+    let me = s.me.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(SETTLE_SECONDS as u64));
+        let view = Arc::new(power::read_state());
+        me.update(move |s, tx| {
+            if !(s.phase == Phase::Shown && s.tab == Tab::Sleep) {
+                tx.instant();
+            }
+            s.now = time::unix_now();
+            keep_timers(s, view);
+            sync_item(s);
+        });
+    });
 }
 
 fn set_lid_hold(s: &mut Ui, lid: LidHold) {
@@ -231,7 +268,7 @@ fn ask_lid(s: &mut Ui) {
             match result {
                 Ok(()) if wanted => set_lid_hold(s, LidHold::On),
                 // The session ended, or the switch went off, while the dialog was open.
-                Ok(()) => power::release_lid(&lid_flag(s)),
+                Ok(()) => release_lid(s),
                 Err(reason) => {
                     set_lid_hold(s, LidHold::Off);
                     // The switch says what is so: without the password, the lid sleeps the Mac.
@@ -317,12 +354,16 @@ pub fn refresh_state(s: &mut Ui) {
     if s.demo {
         return;
     }
-    let mut state = power::read_state();
+    keep_timers(s, Arc::new(power::read_state()));
+}
+
+/// Takes a reading made without the timers, which keep their last reading.
+fn keep_timers(s: &mut Ui, mut state: Arc<PowerView>) {
     if let Some(view) = &s.awake.view {
+        let state = Arc::make_mut(&mut state);
         (state.battery, state.adapter, state.timers_read) = (view.battery.clone(), view.adapter.clone(), view.timers_read);
     }
-    let view = Arc::new(state);
-    apply_view(s, view);
+    apply_view(s, state);
 }
 
 fn apply(s: &mut Ui, view: Arc<PowerView>, tx: &mut Tx) {
@@ -334,11 +375,15 @@ fn apply(s: &mut Ui, view: Arc<PowerView>, tx: &mut Tx) {
 
 fn apply_view(s: &mut Ui, view: Arc<PowerView>) {
     // The earlier run's sleep-off is gone once sleep is back on, whoever turned it on.
+    let was_left_off = s.awake.left_off;
     if s.awake.left_off && !view.sleep_disabled {
         s.awake.left_off = false;
         let _ = std::fs::remove_file(lid_flag(s));
     }
     s.awake.view = Some(view);
+    if was_left_off != s.awake.left_off {
+        sync_item(s);
+    }
 }
 
 /// Shows `source`'s idle timers.
@@ -391,6 +436,9 @@ pub fn set_timer(s: &mut Ui, source: Source, setting: Setting) {
 pub fn allow_sleep(s: &mut Ui) {
     if s.demo {
         s.awake.left_off = false;
+        if let Some(view) = &mut s.awake.view {
+            Arc::make_mut(view).sleep_disabled = false;
+        }
         return;
     }
     if s.awake.asking.is_some() {
@@ -460,10 +508,19 @@ pub fn sync_item(s: &Ui) {
         return;
     }
     let Some(session) = s.awake.session.as_ref().filter(|_| s.config.sleep.menu_bar) else {
-        status_item::remove(status_item::AWAKE);
+        // Sleep left off by an earlier run is said in the menu bar, whatever the settings show
+        // there: the Mac won't sleep with its lid closed, and nothing else would say so.
+        if s.awake.session.is_none() && s.awake.sleep_stuck_off(time::unix_now()) && s.awake.left_off {
+            status_item::install(&s.me, &s.data_dir, status_item::AWAKE, "Keep awake", &status_item::CUP_MARK);
+            let part = status_item::Part { tag: None, text: "Sleep off".to_owned(), severity: crate::model::Severity::Warning };
+            status_item::set(status_item::AWAKE, None, &[part], false, "Sleep is off: this Mac won't sleep, even with its lid closed. Open to turn it back on.");
+        } else {
+            status_item::remove(status_item::AWAKE);
+        }
+        s.sync_app_item();
         return;
     };
-    status_item::install(s.me.clone(), s.data_dir.clone(), status_item::AWAKE, "Keep awake", &status_item::CUP_MARK);
+    status_item::install(&s.me, &s.data_dir, status_item::AWAKE, "Keep awake", &status_item::CUP_MARK);
     let now = time::unix_now();
     let (text, tooltip) = match session.until {
         Some(until) => (left_words(until - now), format!("Keeping this Mac awake until {}", time::clock(until, false))),
@@ -471,10 +528,9 @@ pub fn sync_item(s: &Ui) {
     };
     let parts = if text.is_empty() { Vec::new() } else { vec![status_item::Part { tag: None, text, severity: crate::model::Severity::Normal }] };
     status_item::set(status_item::AWAKE, None, &parts, false, &tooltip);
+    s.sync_app_item();
 }
 
-fn save(s: &Ui) {
-    if !s.demo {
-        config::save(&s.data_dir, &s.config);
-    }
+fn save(s: &mut Ui) {
+    ui::save_config(s);
 }

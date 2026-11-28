@@ -34,9 +34,15 @@ pub type Tokens = [u64; 5];
 /// Days of hourly activity handed to the limit chart: a week's window and the day it started.
 pub const ACTIVITY_DAYS: i32 = 8;
 
-/// Request sizes are kept in steps of this many prompt tokens, which is what long-context
-/// price tiers are cut at.
-pub const CONTEXT_STEP: u64 = 50_000;
+/// Request sizes are kept in steps of this many prompt tokens. Long-context price tiers start
+/// at 100,000, 200,000 and 272,000 tokens, all whole steps, so a request is never priced a
+/// tier down.
+pub const CONTEXT_STEP: u64 = 4_000;
+
+/// A prompt's size in [`CONTEXT_STEP`]s.
+fn context_steps(prompt: u64) -> u8 {
+    (prompt / CONTEXT_STEP).min(u8::MAX as u64) as u8
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct CellKey {
@@ -74,12 +80,33 @@ struct Message<'a> {
     id: Option<Cow<'a, str>>,
     #[serde(borrow)]
     model: Option<Cow<'a, str>>,
-    usage: Option<Usage>,
+    #[serde(borrow)]
+    usage: Option<Usage<'a>>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct Usage {
+struct Usage<'a> {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation: Option<CacheCreation>,
+    /// The requests behind the message, left unparsed: only an advisor's are read, and few
+    /// messages have one.
+    #[serde(borrow)]
+    iterations: Option<&'a serde_json::value::RawValue>,
+}
+
+/// One request behind a message. The message's own usage already sums those of its model;
+/// an advisor's request ran on another model and is counted nowhere else.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Iteration<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    model: Option<Cow<'a, str>>,
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_input_tokens: u64,
@@ -94,15 +121,29 @@ struct CacheCreation {
     ephemeral_1h_input_tokens: u64,
 }
 
-impl Usage {
+/// Token counts in [`Tokens`]' order. Cache writes are split into the hour's and the rest: a
+/// total larger than its split has five minute writes the split left out.
+fn token_counts(input: u64, output: u64, written: u64, read: u64, split: Option<&CacheCreation>) -> [u32; 5] {
+    let write_1h = split.map_or(0, |split| split.ephemeral_1h_input_tokens);
+    let write_5m = written.saturating_sub(write_1h).max(split.map_or(0, |split| split.ephemeral_5m_input_tokens));
+    [input, output, write_5m, write_1h, read].map(|count| count.min(u32::MAX as u64) as u32)
+}
+
+impl Usage<'_> {
     fn tokens(&self) -> [u32; 5] {
-        let (write_5m, write_1h) = match &self.cache_creation {
-            Some(split) if split.ephemeral_5m_input_tokens + split.ephemeral_1h_input_tokens > 0 => (split.ephemeral_5m_input_tokens, split.ephemeral_1h_input_tokens),
-            _ => (self.cache_creation_input_tokens, 0),
-        };
-        [self.input_tokens, self.output_tokens, write_5m, write_1h, self.cache_read_input_tokens].map(|count| count.min(u32::MAX as u64) as u32)
+        token_counts(self.input_tokens, self.output_tokens, self.cache_creation_input_tokens, self.cache_read_input_tokens, self.cache_creation.as_ref())
     }
 }
+
+impl Iteration<'_> {
+    fn tokens(&self) -> [u32; 5] {
+        token_counts(self.input_tokens, self.output_tokens, self.cache_creation_input_tokens, self.cache_read_input_tokens, self.cache_creation.as_ref())
+    }
+}
+
+/// Bytes of a log read at a time: a month of sessions is gigabytes, and one file hundreds of
+/// megabytes, so a file is never held whole.
+const CHUNK: u64 = 4 << 20;
 
 pub struct Scanner {
     /// The `projects` folders to read.
@@ -174,24 +215,34 @@ impl Scanner {
         file.seek(SeekFrom::Start(from)).ok()?;
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.clear();
-        file.read_to_end(&mut buffer).ok()?;
-        // A last line still being written waits for the next scan.
-        let complete = memchr::memrchr(b'\n', &buffer).map_or(0, |at| at + 1);
-        let mut changed = false;
         // The session's log folder, named after the folder it was started in.
         let folder = self.roots.iter().find_map(|root| path.strip_prefix(root).ok()).and_then(|rest| rest.components().next()).map(|part| part.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
         let assistant = memmem::Finder::new(br#""type":"assistant""#);
-        for line in buffer[..complete].split(|b| *b == b'\n') {
-            if assistant.find(line).is_some() {
-                changed |= self.count_line(line, cutoff, &folder);
+        let (mut changed, mut counted) = (false, 0u64);
+        // A chunk at a time: the lines that ended in it are counted and dropped, and a line cut
+        // by its end waits at the buffer's start for the rest.
+        while let Ok(read) = (&mut file).take(CHUNK).read_to_end(&mut buffer) {
+            if read == 0 {
+                break;
             }
+            let complete = memchr::memrchr(b'\n', &buffer).map_or(0, |at| at + 1);
+            for line in buffer[..complete].split(|b| *b == b'\n') {
+                if assistant.find(line).is_some() {
+                    changed |= self.count_line(line, cutoff, &folder);
+                }
+            }
+            buffer.drain(..complete);
+            counted += complete as u64;
         }
-        self.cursors.insert(path.to_owned(), from + complete as u64);
+        // A last line still being written waits for the next scan.
+        self.cursors.insert(path.to_owned(), from + counted);
+        buffer.clear();
         self.buffer = buffer;
         Some(changed)
     }
 
-    /// Counts one line of the log folder `folder`.
+    /// Counts one line of the log folder `folder`: the message, and each request an advisor
+    /// answered for it, under the advisor's own model.
     fn count_line(&mut self, line: &[u8], cutoff: i64, folder: &str) -> bool {
         let Ok(line) = serde_json::from_slice::<Line>(line) else { return false };
         let (Some(message), Some(timestamp)) = (line.message, line.timestamp) else { return false };
@@ -200,31 +251,45 @@ impl Scanner {
             return false;
         }
         let Some(at) = time::parse_iso(&timestamp).filter(|at| *at >= cutoff) else { return false };
-        let tokens = usage.tokens();
-        if tokens.iter().all(|count| *count == 0) {
-            return false;
-        }
-
         let quarter = at.div_euclid(900);
         let (day, hour) = *self.local_memo.entry(quarter).or_insert_with(|| {
             let local = time::local(at);
             (local.day, local.hour)
         });
-        let prompt = tokens[INPUT] as u64 + tokens[CACHE_WRITE_5M] as u64 + tokens[CACHE_WRITE_1H] as u64 + tokens[CACHE_READ] as u64;
         let project = self.project_index(session_folder(folder, line.cwd.as_deref().unwrap_or("")));
-        let key = CellKey { day, hour, model: self.model_index(&model), context: (prompt / CONTEXT_STEP).min(u8::MAX as u64) as u8, project };
-        let cell = self.cell(key);
+        let id = message.id.filter(|id| !id.is_empty());
 
-        let Some(id) = message.id.filter(|id| !id.is_empty()) else {
+        let mut changed = self.count_once(id.as_deref().map(|id| (id, 0)), day, hour, &model, project, usage.tokens());
+        let advised = usage.iterations.filter(|raw| memmem::find(raw.get().as_bytes(), b"advisor_message").is_some());
+        if let Some(iterations) = advised.and_then(|raw| serde_json::from_str::<Vec<Iteration>>(raw.get()).ok()) {
+            let advisors = iterations.iter().filter(|iteration| iteration.kind == "advisor_message");
+            for (nth, advisor) in advisors.enumerate() {
+                let Some(model) = advisor.model.as_deref() else { continue };
+                changed |= self.count_once(id.as_deref().map(|id| (id, nth as u32 + 1)), day, hour, model, project, advisor.tokens());
+            }
+        }
+        changed
+    }
+
+    /// Adds `tokens` of `model` to their cell, once per `id`: a message's id with 0, or with
+    /// the place of one of its advisor's requests. A later copy with more output replaces the
+    /// earlier one, which was written before the answer finished.
+    fn count_once(&mut self, id: Option<(&str, u32)>, day: i32, hour: u8, model: &str, project: u16, tokens: [u32; 5]) -> bool {
+        if tokens.iter().all(|count| *count == 0) {
+            return false;
+        }
+        let prompt = tokens[INPUT] as u64 + tokens[CACHE_WRITE_5M] as u64 + tokens[CACHE_WRITE_1H] as u64 + tokens[CACHE_READ] as u64;
+        let key = CellKey { day, hour, model: self.model_index(model), context: context_steps(prompt), project };
+        let cell = self.cell(key);
+        let Some((id, part)) = id else {
             self.add(cell, tokens);
             return true;
         };
-        let id = self.hasher.hash_one(id.as_bytes());
+        let id = self.hasher.hash_one((id.as_bytes(), part));
         if let Some((earlier_cell, earlier)) = self.counted.get(&id).map(|counted| (counted.cell, counted.tokens)) {
             if tokens[OUTPUT] <= earlier[OUTPUT] {
                 return false;
             }
-            // The earlier copy was written before the answer finished: this one replaces it.
             self.subtract(earlier_cell, earlier);
         }
         self.add(cell, tokens);
@@ -232,11 +297,12 @@ impl Scanner {
         true
     }
 
-    /// Counts `tokens` of `model`, sent from the folder `cwd`, at `at`, for logs read elsewhere
-    /// (Codex's), which carry no message ids to tell copies apart.
-    pub fn record(&mut self, at: i64, model: &str, cwd: &str, tokens: [u32; 5]) {
+    /// Counts `tokens` of `model`, sent from the folder `cwd`, at `at`, in a request of `prompt`
+    /// prompt tokens, for logs read elsewhere (Codex's), which carry no message ids to tell
+    /// copies apart.
+    pub fn record(&mut self, at: i64, model: &str, cwd: &str, prompt: u64, tokens: [u32; 5]) {
         let local = time::local(at);
-        let key = CellKey { day: local.day, hour: local.hour, model: self.model_index(model), context: 0, project: self.project_index(cwd) };
+        let key = CellKey { day: local.day, hour: local.hour, model: self.model_index(model), context: context_steps(prompt), project: self.project_index(cwd) };
         let cell = self.cell(key);
         self.add(cell, tokens);
     }
@@ -754,5 +820,67 @@ mod tests {
         assert_eq!(session_folder(folder, "/Users/me/dotfiles"), "/Users/me/dotfiles", "moved out of it");
         assert_eq!(session_folder("-Users-me--t3-scratch", "/Users/me/.t3/scratch/a"), "/Users/me/.t3/scratch");
         assert_eq!(session_folder("demo", "/"), "/");
+    }
+
+    #[test]
+    fn an_advisors_requests_count_under_its_own_model_once() {
+        let advised = |output: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-12T10:00:00.000Z","cwd":"/work/a","message":{{"id":"msg_1","model":"claude-opus-5-5","usage":{{"input_tokens":4,"output_tokens":{output},"cache_creation_input_tokens":4956,"cache_read_input_tokens":1000,"cache_creation":{{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":924}},"iterations":[{{"type":"message","input_tokens":2,"output_tokens":90}},{{"type":"advisor_message","model":"claude-fable-5-2","input_tokens":100122,"output_tokens":4023,"cache_read_input_tokens":0}},{{"type":"message","input_tokens":2,"output_tokens":10}}]}}}}}}"#
+            )
+        };
+        // The message is written twice, as Claude Code does, the second copy complete.
+        let (mut scanner, dir) = scanner_over("advisor", &[advised(40), advised(100)]);
+        assert!(scanner.scan(NOW));
+        let view = scanner.view(&prices(), NOW);
+        let month = &view.ranges[2];
+        let by_name = |name: &str| month.models.iter().find(|m| m.name == name).map(|m| m.tokens);
+        assert_eq!(by_name("claude-fable-5-2"), Some(100_122 + 4023), "the advisor's request, once");
+        // The message's own: 4 in, 100 out, 1000 read and all 4956 written.
+        assert_eq!(by_name("claude-opus-5-5"), Some(4 + 100 + 1000 + 4956));
+        assert_eq!((month.tokens[CACHE_WRITE_1H], month.tokens[CACHE_WRITE_5M]), (924, 4032), "writes the split left out are five minute ones");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_larger_than_a_chunk_is_read_whole_and_in_order() {
+        // Lines of other kinds pad the file past two chunks; the messages sit between them.
+        let padding = format!(r#"{{"type":"user","message":"{}"}}"#, "x".repeat(1 << 20));
+        let mut lines = Vec::new();
+        for at in 0..10 {
+            lines.push(padding.clone());
+            lines.push(line(&format!("msg_{at}"), "claude-opus-4-5", "2026-11-12T10:00:00.000Z", 10, 1, 0, 0));
+        }
+        let (mut scanner, dir) = scanner_over("chunks", &lines);
+        assert!(scanner.scan(NOW));
+        assert_eq!(scanner.view(&prices(), NOW).ranges[2].total(), 110);
+        assert!(!scanner.scan(NOW), "the cursor ends at the file's end");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn request_sizes_keep_the_price_tiers_apart() {
+        for tier in [100_000u64, 200_000, 272_000] {
+            assert_eq!(context_steps(tier) as u64 * CONTEXT_STEP, tier);
+            assert!((context_steps(tier - 1) as u64 * CONTEXT_STEP) < tier);
+        }
+    }
+
+    /// Reads this Mac's own Claude Code logs, as the worker does at launch, and prints what it
+    /// counted and how long it took. Run with `--ignored --nocapture`; `/usr/bin/time -l`
+    /// around it shows the memory the scan peaks at.
+    #[test]
+    #[ignore]
+    fn scans_this_macs_logs() {
+        let now = time::unix_now();
+        let mut scanner = Scanner::new(&crate::claude::config_dirs());
+        let started = std::time::Instant::now();
+        scanner.scan(now);
+        let view = scanner.view(&Prices::default(), now);
+        eprintln!("scanned in {:.1} s, {} messages counted", started.elapsed().as_secs_f64(), scanner.counted.len());
+        for model in &view.ranges[2].models {
+            eprintln!("{:>16} tokens  {}", model.tokens, model.name);
+        }
+        assert!(!scanner.scan(now), "a second scan finds nothing new");
     }
 }

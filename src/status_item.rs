@@ -17,11 +17,14 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSMutableAttributedString, NSError, NSNull, NSPoint, NSRect, NSSize, NSString, NSURL};
 use rune::AppHandle;
 
-use crate::model::Severity;
-use crate::ui::{self, Anchor, Tab, Ui};
+use crate::model::{Provider, Severity};
+use crate::ui::{self, Anchor, Ui};
 
 /// The keep-awake item's id, which opens the Sleep tab.
 pub const AWAKE: &str = "sleep";
+/// The item that stands in when the settings leave the menu bar no other: without one there
+/// would be no way to the panel.
+pub const APP: &str = "app";
 const TAG_USED: isize = 1;
 const TAG_LOGIN: isize = 2;
 /// The mark's side in points: the size of the system's own menu bar icons.
@@ -44,6 +47,8 @@ pub const CUP_MARK: Mark = Mark {
     even_odd: true,
 };
 pub const DEEPSEEK_MARK: Mark = Mark { path: include_str!("../assets/providers/deepseek.path"), view: 24.0, even_odd: false };
+/// Nerda Bar itself: three bars rising.
+pub const APP_MARK: Mark = Mark { path: "M2 9 H5 V14 H2 Z M6.5 5.5 H9.5 V14 H6.5 Z M11 2 H14 V14 H11 Z", view: 16.0, even_odd: false };
 
 /// A picture drawn beside a measure's number, in place of a provider's mark.
 #[derive(Clone, Debug, PartialEq)]
@@ -60,14 +65,35 @@ struct Item {
     menu: Retained<NSMenu>,
     /// A provider's item, which keeps its mark; a measure's shows its glyph or nothing.
     marked: bool,
-    /// What the item shows now, so an unchanged refresh draws nothing.
-    shown: Option<(Option<Glyph>, Vec<Part>, bool)>,
+    /// What the item shows now and its tooltip, so an unchanged refresh touches nothing.
+    shown: Option<(Option<Glyph>, Vec<Part>, bool, String)>,
+    /// What the button and the menu send their actions to. AppKit holds it weakly, so it
+    /// lives here, as long as the item.
+    _target: Retained<Target>,
+    /// In the menu bar now. An item taken away is hidden, not let go: it may be the one whose
+    /// menu asked for that, still in the middle of its action.
+    visible: bool,
 }
 
 thread_local! {
     static ITEMS: RefCell<Vec<Item>> = const { RefCell::new(Vec::new()) };
-    /// Whether percentages show what is used; the menu's checkmark reads it.
-    static SHOW_USED: Cell<bool> = const { Cell::new(false) };
+    /// Whether Claude's and Codex's percentages show what is used; each menu's checkmark
+    /// reads its own.
+    static SHOW_USED: Cell<[bool; 2]> = const { Cell::new([false; 2]) };
+}
+
+/// The provider an item with this id stands for.
+fn provider_of(id: &str) -> Option<Provider> {
+    Provider::ALL.into_iter().find(|provider| provider.id() == id)
+}
+
+/// The place of a provider's "used" flag in [`SHOW_USED`]; DeepSeek's balance has none.
+fn used_slot(provider: Provider) -> Option<usize> {
+    match provider {
+        Provider::Claude => Some(0),
+        Provider::Codex => Some(1),
+        Provider::DeepSeek => None,
+    }
 }
 
 struct Ivars {
@@ -104,8 +130,8 @@ define_class!(
                 }
                 status.setMenu(None);
             } else if let Some(anchor) = anchor(&status, mtm) {
-                let tab = Tab::from_id(self.ivars().provider);
-                self.ivars().app.update(move |s, tx| ui::toggle(s, anchor, tab, tx));
+                let item = self.ivars().provider;
+                self.ivars().app.update(move |s, tx| ui::toggle(s, anchor, item, tx));
             }
         }
 
@@ -114,15 +140,20 @@ define_class!(
             self.ivars().app.update(crate::awake::stop);
         }
 
+        // The menu acts on the provider whose item it is, whatever tab the panel is on.
         #[unsafe(method(refresh:))]
         fn refresh(&self, _sender: Option<&AnyObject>) {
-            self.ivars().app.update(|s, _| ui::refresh(s));
+            if let Some(provider) = provider_of(self.ivars().provider) {
+                self.ivars().app.update(move |s, _| ui::check_again(s, provider));
+            }
         }
 
         #[unsafe(method(toggleUsed:))]
         fn toggle_used(&self, _sender: Option<&AnyObject>) {
-            let show_used = !SHOW_USED.get();
-            self.ivars().app.update(move |s, _| ui::set_show_used(s, show_used));
+            let Some(provider) = provider_of(self.ivars().provider) else { return };
+            let Some(slot) = used_slot(provider) else { return };
+            let show_used = !SHOW_USED.get()[slot];
+            self.ivars().app.update(move |s, _| ui::set_provider_show_used(s, provider, show_used));
         }
 
         #[unsafe(method(toggleLogin:))]
@@ -160,7 +191,9 @@ define_class!(
                     item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
                 }
             };
-            check(TAG_USED, SHOW_USED.get());
+            if let Some(slot) = provider_of(self.ivars().provider).and_then(used_slot) {
+                check(TAG_USED, SHOW_USED.get()[slot]);
+            }
             check(TAG_LOGIN, login_item::enabled());
         }
     }
@@ -360,28 +393,46 @@ fn glyph_image(glyph: &Glyph) -> Retained<NSImage> {
     image
 }
 
+/// Whether the item with `id` was made, bringing it back to the menu bar if it was taken away.
+fn bring_back(id: &str) -> bool {
+    ITEMS.with_borrow_mut(|items| {
+        let Some(item) = items.iter_mut().find(|item| item.id == id) else { return false };
+        if !item.visible {
+            item.status.setVisible(true);
+            item.visible = true;
+        }
+        true
+    })
+}
+
+/// Whether the item with `id` is in the menu bar now.
+pub fn installed(id: &str) -> bool {
+    ITEMS.with_borrow(|items| items.iter().any(|item| item.id == id && item.visible))
+}
+
 /// Adds a measure's menu bar item, unless it is there already. Call on the main thread.
-pub fn install_measure(app: AppHandle<Ui>, data_dir: PathBuf, id: &'static str, name: &str) {
-    if ITEMS.with_borrow(|items| items.iter().any(|item| item.id == id)) {
-        return;
+pub fn install_measure(app: &AppHandle<Ui>, data_dir: &std::path::Path, id: &'static str, name: &str) {
+    if !bring_back(id) {
+        add(app.clone(), data_dir.to_owned(), id, name, None);
     }
-    add(app, data_dir, id, name, None);
 }
 
 /// Takes an item out of the menu bar. macOS keeps its place for when it comes back.
 pub fn remove(id: &str) {
-    let removed = ITEMS.with_borrow_mut(|items| items.iter().position(|item| item.id == id).map(|at| items.remove(at)));
-    if let Some(item) = removed {
-        NSStatusBar::systemStatusBar().removeStatusItem(&item.status);
-    }
+    ITEMS.with_borrow_mut(|items| {
+        if let Some(item) = items.iter_mut().find(|item| item.id == id && item.visible) {
+            item.status.setVisible(false);
+            item.visible = false;
+        }
+    });
 }
 
-/// Adds a provider's menu bar item. Call on the main thread, after the app has started.
-pub fn install(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str, mark: &Mark) {
-    if ITEMS.with_borrow(|items| items.iter().any(|item| item.id == provider)) {
-        return;
+/// Adds a provider's menu bar item, unless it is there already. Call on the main thread, after
+/// the app has started.
+pub fn install(app: &AppHandle<Ui>, data_dir: &std::path::Path, provider: &'static str, name: &str, mark: &Mark) {
+    if !bring_back(provider) {
+        add(app.clone(), data_dir.to_owned(), provider, name, Some(mark));
     }
-    add(app, data_dir, provider, name, Some(mark));
 }
 
 fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str, mark: Option<&Mark>) {
@@ -389,6 +440,9 @@ fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
     // Remembered by macOS under this name, so the item keeps the place it is dragged to.
     status.setAutosaveName(Some(&NSString::from_str(&format!("nerda.bar.{provider}"))));
+    // macOS also remembers an item dragged out of the menu bar as hidden: the settings say
+    // which items show, so one they ask for is there.
+    status.setVisible(true);
 
     let target = Target::alloc(mtm).set_ivars(Ivars { app, data_dir, provider });
     // SAFETY: NSObject's `init` on a freshly allocated subclass instance.
@@ -424,9 +478,12 @@ fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str
     if provider == AWAKE {
         menu.addItem(&item("Stop Keeping Awake", sel!(stopAwake:)));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-    } else if mark.is_some() {
+    } else if let Some(shown) = provider_of(provider) {
         menu.addItem(&item(&format!("Refresh {name}"), sel!(refresh:)));
-        menu.addItem(&tagged(item("Show Used Instead of Left", sel!(toggleUsed:)), TAG_USED));
+        // A balance is an amount, not a share of a limit: it has no "used".
+        if used_slot(shown).is_some() {
+            menu.addItem(&tagged(item("Show Used Instead of Left", sel!(toggleUsed:)), TAG_USED));
+        }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
     }
     let login = tagged(item("Launch at Login", sel!(toggleLogin:)), TAG_LOGIN);
@@ -446,9 +503,7 @@ fn add(app: AppHandle<Ui>, data_dir: PathBuf, provider: &'static str, name: &str
     menu.addItem(&quit);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
 
-    // The target lives as long as the app: AppKit holds it weakly.
-    std::mem::forget(target);
-    ITEMS.with_borrow_mut(|items| items.push(Item { id: provider, status, menu, marked: mark.is_some(), shown: None }));
+    ITEMS.with_borrow_mut(|items| items.push(Item { id: provider, status, menu, marked: mark.is_some(), shown: None, _target: target, visible: true }));
 }
 
 /// Turns off Core Animation's implicit animations on the app's Metal layers.
@@ -491,10 +546,10 @@ pub fn hold_layers_still() {
     }
 }
 
-/// Where a provider's item is on screen. Call on the main thread.
-pub fn anchor_of(provider: &str) -> Option<Anchor> {
+/// Where the first item in the menu bar is on screen, and its id. Call on the main thread.
+pub fn first_anchor() -> Option<(&'static str, Anchor)> {
     let mtm = MainThreadMarker::new()?;
-    ITEMS.with_borrow(|items| items.iter().find(|item| item.id == provider).and_then(|item| anchor(&item.status, mtm)))
+    ITEMS.with_borrow(|items| items.iter().filter(|item| item.visible).find_map(|item| anchor(&item.status, mtm).map(|anchor| (item.id, anchor))))
 }
 
 /// Whether Launch at Login can be switched (the app runs from a bundle), and whether it is on.
@@ -511,9 +566,18 @@ pub fn open(path: &std::path::Path) {
     open_path(path);
 }
 
-/// Remembers which way percentages read, for the menu's checkmark.
-pub fn set_show_used(show_used: bool) {
-    SHOW_USED.set(show_used);
+/// Remembers which way `provider`'s percentages read, for its menu's checkmark.
+pub fn set_show_used(provider: Provider, show_used: bool) {
+    if let Some(slot) = used_slot(provider) {
+        let mut flags = SHOW_USED.get();
+        flags[slot] = show_used;
+        SHOW_USED.set(flags);
+    }
+}
+
+/// How many items are in the menu bar, not counting the one with `id`.
+pub fn others(id: &str) -> usize {
+    ITEMS.with_borrow(|items| items.iter().filter(|item| item.visible && item.id != id).count())
 }
 
 /// One number in a menu bar item, and a quieter name before it: with several limits shown, a
@@ -532,12 +596,22 @@ pub fn set(provider: &str, glyph: Option<Glyph>, parts: &[Part], stale: bool, to
     let Some(mtm) = MainThreadMarker::new() else { return };
     ITEMS.with_borrow_mut(|items| {
         let Some(item) = items.iter_mut().find(|item| item.id == provider) else { return };
-        let Some(button) = item.status.button(mtm) else { return };
-        button.setToolTip(Some(&NSString::from_str(tooltip)));
-        let shown = (glyph, parts.to_vec(), stale);
-        if item.shown.as_ref() == Some(&shown) {
+        // Unchanged since the last time, as most two-second readings are: nothing to do.
+        if item.shown.as_ref().is_some_and(|(g, p, s, t)| *g == glyph && p.as_slice() == parts && *s == stale && t == tooltip) {
             return;
         }
+        let Some(button) = item.status.button(mtm) else { return };
+        button.setToolTip(Some(&NSString::from_str(tooltip)));
+        // Only the tooltip moved on (a countdown in it): the title and the picture stay.
+        if let Some((g, p, s, t)) = &mut item.shown
+            && *g == glyph
+            && p.as_slice() == parts
+            && *s == stale
+        {
+            *t = tooltip.to_owned();
+            return;
+        }
+        let shown = (glyph, parts.to_vec(), stale, tooltip.to_owned());
         if !item.marked {
             button.setImage(shown.0.as_ref().map(glyph_image).as_deref());
         }

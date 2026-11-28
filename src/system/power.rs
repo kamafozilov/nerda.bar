@@ -366,6 +366,11 @@ pub fn set(source: Source, setting: Setting, now: &Timers) -> Result<(), String>
 /// root, that turns it back on as soon as `flag` is gone or this app (`pid`) has quit or
 /// crashed. Removing `flag` needs no password.
 pub fn hold_lid(flag: &Path, pid: u32) -> Result<(), String> {
+    // Sleep was already off before this, by the person's own `pmset`: there is nothing to
+    // turn off, and nothing of ours to turn back on afterwards.
+    if read_state().sleep_disabled && !flag.exists() {
+        return Ok(());
+    }
     let flag = flag.to_str().filter(|path| !path.contains(['\'', '"', '\\', '$', '`'])).ok_or("The data folder's name can't be used in a command.")?;
     std::fs::write(flag, format!("{pid}\n")).map_err(|e| e.to_string())?;
     let result = as_admin(&lid_watcher(flag, pid, "/usr/bin/pmset -a disablesleep"), "Nerda Bar wants to keep this Mac awake with its lid closed.");
@@ -376,9 +381,14 @@ pub fn hold_lid(flag: &Path, pid: u32) -> Result<(), String> {
 }
 
 /// The command that turns sleep off with `switch` ("pmset -a disablesleep"), then waits in the
-/// background while `flag` is there and `pid` runs, and turns it back on.
+/// background while `flag` is there and `pid` runs, and turns it back on. It turns it back on
+/// too when it is itself told to end, as every process is when the Mac shuts down or restarts:
+/// without that, sleep would stay off after the restart. It waits on its `sleep` rather than
+/// in it, so the signal is acted on at once.
 fn lid_watcher(flag: &str, pid: u32, switch: &str) -> String {
-    let watch = format!("{switch} 1; while /bin/kill -0 {pid} 2>/dev/null && [ -e \"{flag}\" ]; do /bin/sleep 2; done; {switch} 0; /bin/rm -f \"{flag}\"");
+    let watch = format!(
+        "restore() {{ {switch} 0; /bin/rm -f \"{flag}\"; }}; trap \"restore; exit 0\" TERM INT HUP; {switch} 1; while /bin/kill -0 {pid} 2>/dev/null && [ -e \"{flag}\" ]; do /bin/sleep 2 & wait $!; done; restore"
+    );
     format!("/usr/bin/nohup /bin/sh -c '{watch}' >/dev/null 2>&1 &")
 }
 
@@ -527,6 +537,17 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2500));
         wait_for("1 0");
         assert!(!flag.exists(), "the watcher takes its flag with it");
+        // Told to end, as at shutdown, with its app still running and its flag still there.
+        std::fs::write(&marker, "").unwrap();
+        std::fs::write(&flag, "").unwrap();
+        assert!(Command::new("/bin/sh").args(["-c", &lid_watcher(flag.to_str().unwrap(), std::process::id(), &switch)]).status().unwrap().success());
+        wait_for("1");
+        let watchers = Command::new("/usr/bin/pgrep").args(["-f", &format!("restore.*{}", flag.display())]).output().unwrap();
+        for pid in String::from_utf8_lossy(&watchers.stdout).split_whitespace() {
+            let _ = Command::new("/bin/kill").args(["-TERM", pid]).status();
+        }
+        wait_for("1 0");
+        assert!(!flag.exists(), "a watcher told to end turns sleep back on first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

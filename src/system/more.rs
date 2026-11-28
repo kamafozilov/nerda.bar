@@ -56,7 +56,13 @@ pub struct ChargePoint {
     pub plugged: bool,
 }
 
+/// A measure no menu bar item shows is read this often while the panel is not on its tab:
+/// each costs a millisecond or more (the GPU and the battery are IOKit lookups), which a
+/// reading every two seconds for another measure's item would otherwise pay too.
+const QUIET_EVERY: f64 = 20.0;
+
 /// What one reading adds to the view.
+#[derive(Clone, Default)]
 pub struct Readings {
     pub disk: Option<DiskView>,
     pub net: Option<NetView>,
@@ -68,7 +74,17 @@ pub struct Readings {
 pub struct More {
     data_dir: Option<PathBuf>,
     disk_last: Option<(f64, disk::io::Io)>,
+    /// When the network was last read, and the bytes counted by then.
     net_last: Option<(f64, (u64, u64))>,
+    /// Each port's counters at the last reading, by its BSD name.
+    net_ports: HashMap<String, (u64, u64)>,
+    /// Bytes received and sent while this ran: each port's rises, added up. A port that comes
+    /// or goes changes nothing here, where a sum of the ports' own counters would jump by all
+    /// it carried since the Mac started.
+    net_counted: (u64, u64),
+    /// The last readings, and when each measure was read.
+    latest: Readings,
+    read_at: [Option<f64>; 4],
     volumes: Option<(f64, Vec<disk::Volume>)>,
     /// The local day the network counts are for, when they start, and the counters then.
     day: Option<(i32, i64, (u64, u64))>,
@@ -89,6 +105,10 @@ impl More {
             data_dir,
             disk_last: None,
             net_last: None,
+            net_ports: HashMap::new(),
+            net_counted: (0, 0),
+            latest: Readings::default(),
+            read_at: [None; 4],
             volumes: None,
             day: None,
             charge,
@@ -101,20 +121,42 @@ impl More {
         }
     }
 
-    /// Reads everything once, at `now`, and adds what held since `from` to the histories.
-    /// Reads what `wanted` asks for (`WANT_*` bits) once, at `now`, and adds what held since
-    /// `from` to the histories.
-    pub fn read(&mut self, from: f64, now: f64, wanted: u8) -> Readings {
-        let on = |bit: u8| wanted & bit != 0;
-        Readings {
-            disk: on(super::WANT_DISK).then(|| self.disk(from, now)).flatten(),
-            net: on(super::WANT_NETWORK).then(|| self.net(from, now)).flatten(),
-            battery: on(super::WANT_BATTERY).then(|| self.battery(now)).flatten(),
-            gpu: on(super::WANT_GPU).then(|| self.gpu(from, now)).flatten(),
+    /// Reads what `wanted` asks for (`WANT_*` bits) at `now`, and adds what held since `from`
+    /// to the histories. A measure in `often` is read every time; the rest of `wanted` every
+    /// [`QUIET_EVERY`] seconds, with the last reading standing in between.
+    pub fn read(&mut self, from: f64, now: f64, wanted: u8, often: u8) -> Readings {
+        for (at, bit) in [super::WANT_DISK, super::WANT_NETWORK, super::WANT_BATTERY, super::WANT_GPU].into_iter().enumerate() {
+            if wanted & bit == 0 {
+                self.read_at[at] = None;
+                match at {
+                    0 => self.latest.disk = None,
+                    1 => self.latest.net = None,
+                    2 => self.latest.battery = None,
+                    _ => self.latest.gpu = None,
+                }
+                continue;
+            }
+            let last = self.read_at[at];
+            if often & bit == 0 && last.is_some_and(|last| now - last < QUIET_EVERY && now >= last) {
+                continue;
+            }
+            // What it reads now held since its own last reading, which for a quiet measure is
+            // further back than the sampler's; after a long gap (the Mac slept), since `from`.
+            let since = last.filter(|last| *last < from && now - last <= QUIET_EVERY * 3.0 + 30.0).unwrap_or(from);
+            self.read_at[at] = Some(now);
+            match at {
+                0 => self.latest.disk = self.disk(since, now),
+                1 => self.latest.net = self.net(since, now),
+                2 => self.latest.battery = self.battery(now),
+                _ => self.latest.gpu = self.gpu(since, now),
+            }
         }
+        self.latest.clone()
     }
 
     fn disk(&mut self, from: f64, now: f64) -> Option<DiskView> {
+        // The first reading has nothing before it to measure a rate against.
+        let measured = self.disk_last.is_some();
         let (read, write) = match (disk::io::counters(), self.disk_last) {
             (Some(io), Some((at, before))) if now > at => {
                 let seconds = now - at;
@@ -127,7 +169,7 @@ impl More {
             }
             (None, _) => (0.0, 0.0),
         };
-        if self.disk_last.is_some() {
+        if measured && self.disk_last.is_some() {
             self.disk_read.add(from, now, read as f32);
             self.disk_write.add(from, now, write as f32);
         }
@@ -141,10 +183,9 @@ impl More {
 
     fn net(&mut self, from: f64, now: f64) -> Option<NetView> {
         let interfaces = net::interfaces();
-        let totals = net::totals(&interfaces);
+        let totals = self.count_ports(&interfaces);
         let (down, up) = match self.net_last {
-            // A counter that went backwards was reset (an interface came and went): no rate.
-            Some((at, before)) if now > at && totals.0 >= before.0 && totals.1 >= before.1 => ((totals.0 - before.0) as f64 / (now - at), (totals.1 - before.1) as f64 / (now - at)),
+            Some((at, before)) if now > at => ((totals.0 - before.0) as f64 / (now - at), (totals.1 - before.1) as f64 / (now - at)),
             _ => (0.0, 0.0),
         };
         if self.net_last.is_some() {
@@ -164,6 +205,23 @@ impl More {
             }
         };
         Some(NetView { primary: net::primary(), interfaces, down, up, received_today: totals.0 - baseline.0, sent_today: totals.1 - baseline.1, since })
+    }
+
+    /// Adds what each port carried since the last reading to the running count, and returns
+    /// it. A port seen for the first time counts from now, and one whose counter fell (it was
+    /// reset) from the reset. VPN tunnels are left out: their traffic also passes through a
+    /// physical port.
+    fn count_ports(&mut self, interfaces: &[Interface]) -> (u64, u64) {
+        let mut ports = HashMap::with_capacity(interfaces.len());
+        for port in interfaces.iter().filter(|port| port.kind != net::Kind::Vpn) {
+            if let Some((received, sent)) = self.net_ports.get(&port.bsd) {
+                self.net_counted.0 += port.received.checked_sub(*received).unwrap_or(port.received);
+                self.net_counted.1 += port.sent.checked_sub(*sent).unwrap_or(port.sent);
+            }
+            ports.insert(port.bsd.clone(), (port.received, port.sent));
+        }
+        self.net_ports = ports;
+        self.net_counted
     }
 
     fn battery(&mut self, now: f64) -> Option<battery::Battery> {
@@ -217,8 +275,14 @@ impl More {
     }
 }
 
+/// What an app's disk use is kept under, as the apps themselves are told apart: an app
+/// bundle by its path, and any other program by its name, whichever copy of it runs. Two
+/// `node`s from different folders are one row in the list, and so one here.
 fn key(app: &AppUsage) -> String {
-    app.path.as_ref().map_or_else(|| app.name.clone(), |path| path.to_string_lossy().into_owned())
+    match app.path.as_ref().filter(|path| path.extension().is_some_and(|ext| ext == "app")) {
+        Some(bundle) => bundle.to_string_lossy().into_owned(),
+        None => app.name.clone(),
+    }
 }
 
 fn load_charge(dir: &Path) -> Vec<ChargePoint> {
@@ -229,7 +293,7 @@ fn save_charge(dir: &Path, points: &[ChargePoint]) {
     if std::fs::create_dir_all(dir).is_ok()
         && let Ok(text) = serde_json::to_string(points)
     {
-        let _ = std::fs::write(dir.join(CHARGE_FILE), text);
+        let _ = crate::config::write_file(dir, CHARGE_FILE, &text);
     }
 }
 
@@ -347,5 +411,49 @@ mod tests {
         assert_eq!(disk(&later, "Xcode"), Some(1000));
         let much_later = more.app_disk(3700.0, &[app("Mail", 0)]);
         assert_eq!(disk(&much_later, "Xcode"), None);
+    }
+
+    #[test]
+    fn a_tool_run_from_two_folders_is_one_app() {
+        let mut more = More::new(None);
+        let node = |path: &str, disk: u64| AppUsage { path: Some(PathBuf::from(path)), ..app("node", disk) };
+        more.app_disk(0.0, &[node("/opt/homebrew/bin/node", 100)]);
+        // The newest `node` process is now another copy: the row keeps what the first one moved.
+        let now = more.app_disk(20.0, &[node("/Users/me/.local/bin/node", 50)]);
+        assert_eq!(now.iter().map(|a| (a.name.as_str(), a.disk)).collect::<Vec<_>>(), [("node", 150)]);
+        // Two apps of one name in different bundles stay apart.
+        let bundle = |path: &str| AppUsage { path: Some(PathBuf::from(path)), ..app("Notes", 1) };
+        assert_ne!(key(&bundle("/Applications/Notes.app")), key(&bundle("/System/Applications/Notes.app")));
+    }
+
+    #[test]
+    fn a_port_that_comes_or_goes_adds_nothing_of_its_own() {
+        let port = |bsd: &str, kind: net::Kind, received: u64, sent: u64| Interface { bsd: bsd.to_owned(), name: bsd.to_owned(), kind, address: None, active: true, received, sent };
+        let mut more = More::new(None);
+        // The first reading counts from now, whatever the ports carried since the Mac started.
+        assert_eq!(more.count_ports(&[port("en0", net::Kind::WiFi, 5_000, 900)]), (0, 0));
+        // A wired port is plugged in with 593 MB already on its counters: none of it is new.
+        assert_eq!(more.count_ports(&[port("en0", net::Kind::WiFi, 5_400, 1_000), port("en6", net::Kind::Ethernet, 593_000_000, 7_000)]), (400, 100));
+        assert_eq!(more.count_ports(&[port("en0", net::Kind::WiFi, 5_500, 1_000), port("en6", net::Kind::Ethernet, 593_000_300, 7_050)]), (800, 150));
+        // Unplugged, it leaves the list: the count doesn't fall.
+        assert_eq!(more.count_ports(&[port("en0", net::Kind::WiFi, 5_600, 1_000)]), (900, 150));
+        // A counter that starts over counts from its reset, and a VPN's traffic isn't counted twice.
+        assert_eq!(more.count_ports(&[port("en0", net::Kind::WiFi, 40, 10), port("utun4", net::Kind::Vpn, 9_999, 9_999)]), (940, 160));
+    }
+
+    #[test]
+    fn a_measure_no_item_shows_is_read_less_often() {
+        let mut more = More::new(None);
+        let wanted = crate::system::WANT_GPU | crate::system::WANT_BATTERY;
+        more.read(0.0, 2.0, wanted, 0);
+        assert_eq!(more.read_at[3], Some(2.0));
+        more.read(2.0, 4.0, wanted, 0);
+        assert_eq!(more.read_at[3], Some(2.0), "two seconds on, the last reading stands");
+        more.read(4.0, 6.0, wanted, crate::system::WANT_GPU);
+        assert_eq!((more.read_at[3], more.read_at[2]), (Some(6.0), Some(2.0)), "in the menu bar it is read every time");
+        more.read(20.0, 22.0, wanted, 0);
+        assert_eq!(more.read_at[2], Some(22.0), "and after its twenty seconds either way");
+        more.read(22.0, 24.0, crate::system::WANT_GPU, 0);
+        assert!(more.read_at[2].is_none() && more.latest.battery.is_none(), "a measure nothing shows is dropped");
     }
 }

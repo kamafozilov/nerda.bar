@@ -274,13 +274,23 @@ pub struct Ui {
     tick_due: f64,
     /// The pixels per point the view last drew at.
     pub drawn_scale: Cell<f32>,
-    /// The item the panel last opened under.
+    /// Where the panel last opened, and the id of the item it opened under.
     last_anchor: Option<Anchor>,
+    last_item: Option<&'static str>,
+    /// The agent whose options the settings show.
+    pub settings_agent: Provider,
+    /// The Add an agent popover takes a new DeepSeek key in place of the one there.
+    pub replacing_key: bool,
+    /// Remove was pressed on DeepSeek's key: the next press removes it.
+    pub confirm_remove_key: bool,
+    /// When `config.json` was last read or written here: later than this, it was edited by hand.
+    config_stamp: Option<std::time::SystemTime>,
 }
 
 impl Ui {
     pub fn new(me: AppHandle<Ui>, worker: Option<Worker>, sampler: Option<Sampler>, config: Config, data_dir: PathBuf, cached: (Option<Snapshot>, Option<Snapshot>), demo: bool) -> Ui {
         let awake = crate::awake::Awake::new(&data_dir, demo);
+        let config_stamp = if demo { None } else { config::modified(&data_dir) };
         let mut ui = Ui {
             me,
             worker,
@@ -317,6 +327,11 @@ impl Ui {
             tick_due: 0.0,
             drawn_scale: Cell::new(0.0),
             last_anchor: None,
+            last_item: None,
+            settings_agent: Provider::Claude,
+            replacing_key: false,
+            confirm_remove_key: false,
+            config_stamp,
         };
         if demo {
             crate::demo::fill(&mut ui);
@@ -399,24 +414,41 @@ impl Ui {
     /// login is still being read. Claude counts until it is known to be signed out; Codex and
     /// DeepSeek once they answered, so a provider that was never set up never flashes in.
     pub fn agents(&self) -> Vec<Tab> {
-        let known = |snapshot: bool, problem: Option<&Problem>| snapshot || problem.is_some_and(|p| !matches!(p, Problem::SignedOut));
         let mut agents = Vec::new();
-        if !matches!(self.claude.problem, Some(Problem::SignedOut)) || self.claude.snapshot.is_some() {
-            agents.push(Tab::Claude);
-        }
-        if known(self.codex.snapshot.is_some(), self.codex.problem.as_ref()) {
-            agents.push(Tab::Codex);
-        }
-        if known(self.deepseek.ledger.is_some(), self.deepseek.problem.as_ref()) {
-            agents.push(Tab::DeepSeek);
+        for (tab, provider) in [(Tab::Claude, Provider::Claude), (Tab::Codex, Provider::Codex), (Tab::DeepSeek, Provider::DeepSeek)] {
+            if self.config.has_tab(provider) && self.connected(provider) {
+                agents.push(tab);
+            }
         }
         agents
+    }
+
+    /// Whether `provider` is signed in, or its login is still being read. Claude counts until
+    /// it is known to be signed out; Codex and DeepSeek once they answered.
+    pub fn connected(&self, provider: Provider) -> bool {
+        let known = |there: bool, problem: Option<&Problem>| there || problem.is_some_and(|p| !matches!(p, Problem::SignedOut));
+        match provider {
+            Provider::Claude => !matches!(self.claude.problem, Some(Problem::SignedOut)) || self.claude.snapshot.is_some(),
+            Provider::Codex => known(self.codex.snapshot.is_some(), self.codex.problem.as_ref()),
+            Provider::DeepSeek => known(self.deepseek.ledger.is_some(), self.deepseek.problem.as_ref()),
+        }
+    }
+
+    /// Whether the top bar has its Agents tab: the settings show at least one agent's.
+    pub fn agents_enabled(&self) -> bool {
+        Provider::ALL.into_iter().any(|provider| self.config.has_tab(provider))
     }
 
     /// The agent the Agents tile opens: the one last shown, while it is still there.
     pub fn current_agent(&self) -> Tab {
         let agents = self.agents();
         if agents.contains(&self.agent_tab) { self.agent_tab } else { agents.first().copied().unwrap_or(Tab::Claude) }
+    }
+
+    /// The tab the panel falls back to when the one asked for isn't shown: the agents while
+    /// they have their tab, else the first of the others. `None` when every tab is hidden.
+    pub fn home_tab(&self) -> Option<Tab> {
+        if self.agents_enabled() { Some(self.current_agent()) } else { self.bar_tabs().first().copied() }
     }
 
     /// This Mac's tabs the top bar shows, in its order. A Mac without a battery has no battery
@@ -459,19 +491,22 @@ impl Ui {
         }
     }
 
-    /// The measures beyond the CPU and memory that a tab or a menu bar item shows.
-    fn wanted(&self) -> u8 {
+    /// The measures beyond the CPU and memory that a tab or a menu bar item shows, and those
+    /// of them a menu bar item shows, which are read as often as the item changes.
+    fn wanted(&self) -> (u8, u8) {
         use crate::system::{WANT_BATTERY, WANT_DISK, WANT_GPU, WANT_NETWORK};
-        [(Tab::Disk, WANT_DISK), (Tab::Network, WANT_NETWORK), (Tab::Battery, WANT_BATTERY), (Tab::Gpu, WANT_GPU)]
-            .into_iter()
-            .filter(|(tab, _)| self.module(*tab).is_some_and(|m| m.tab || m.menu_bar != MenuStyle::Off))
-            .fold(0, |bits, (_, bit)| bits | bit)
+        [(Tab::Disk, WANT_DISK), (Tab::Network, WANT_NETWORK), (Tab::Battery, WANT_BATTERY), (Tab::Gpu, WANT_GPU)].into_iter().fold((0, 0), |(wanted, often), (tab, bit)| {
+            let module = self.module(tab).unwrap_or_default();
+            let in_menu_bar = module.menu_bar != MenuStyle::Off;
+            (wanted | if module.tab || in_menu_bar { bit } else { 0 }, often | if in_menu_bar { bit } else { 0 })
+        })
     }
 
     /// Tells the sampler the rate what is on screen needs, when it changed.
     pub fn sync_rate(&self) {
         if let Some(sampler) = &self.sampler {
-            sampler.set_wanted(self.wanted());
+            let (wanted, often) = self.wanted();
+            sampler.set_wanted(wanted, often);
         }
         let rate = self.wanted_rate();
         if let Some(sampler) = &self.sampler
@@ -494,13 +529,10 @@ impl Ui {
                 status_item::remove(tab.id());
                 continue;
             }
-            status_item::install_measure(self.me.clone(), self.data_dir.clone(), tab.id(), tab.label());
-            let Some(view) = &self.system else {
-                status_item::set(tab.id(), None, &[status_item::Part { tag: Some(tab.label().to_owned()), text: "–".to_owned(), severity: Severity::Normal }], true, tab.label());
-                continue;
-            };
-            let Some(measure) = measure(view, tab) else {
-                status_item::set(tab.id(), None, &[status_item::Part { tag: Some(tab.short().to_owned()), text: "–".to_owned(), severity: Severity::Normal }], true, tab.label());
+            status_item::install_measure(&self.me, &self.data_dir, tab.id(), tab.label());
+            // Not read yet: its name as it will read, and a dash for the number.
+            let Some(measure) = self.system.as_ref().and_then(|view| measure(view, tab)) else {
+                status_item::set(tab.id(), None, &[status_item::Part { tag: Some(tab.short().to_uppercase()), text: "–".to_owned(), severity: Severity::Normal }], true, tab.label());
                 continue;
             };
             let percent = measure.share.map(|share| (share * 100.0).round().clamp(0.0, 100.0) as u8);
@@ -512,20 +544,42 @@ impl Ui {
             let tag = (style == MenuStyle::Text || glyph.is_none()).then(|| tab.short().to_uppercase());
             status_item::set(tab.id(), glyph, &[status_item::Part { tag, text: measure.text, severity: measure.severity }], false, &measure.tooltip);
         }
+        self.sync_app_item();
+    }
+
+    /// Keeps a way to the panel: when the settings leave the menu bar no item at all, Nerda
+    /// Bar's own stands in, and goes when another is back.
+    pub fn sync_app_item(&self) {
+        if self.demo {
+            return;
+        }
+        if status_item::others(status_item::APP) > 0 {
+            status_item::remove(status_item::APP);
+        } else if !status_item::installed(status_item::APP) {
+            status_item::install(&self.me, &self.data_dir, status_item::APP, "Nerda Bar", &status_item::APP_MARK);
+            status_item::set(status_item::APP, None, &[], false, "Nerda Bar: every menu bar item is switched off in its settings");
+        }
     }
 }
 
-/// A click on the menu bar item at `anchor`: opens the panel under it on `tab`, or closes it.
-/// With the panel open under the item on another display's menu bar, it moves there instead.
-pub fn toggle(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
-    let same_item = s.last_anchor.is_some_and(|last| (last.x - anchor.x).abs() < 2.0 && (last.y - anchor.y).abs() < 2.0);
+/// A click on the menu bar item `item` at `anchor`: opens the panel under it on its tab, or
+/// closes it. With the panel open under the item on another display's menu bar, it moves there
+/// instead.
+pub fn toggle(s: &mut Ui, anchor: Anchor, item: &'static str, tx: &mut Tx) {
+    // The same item on the same display, wherever it now sits: an item moves along the menu
+    // bar whenever a neighbour's number changes width.
+    let same_item = s.last_item == Some(item) && s.last_anchor.is_some_and(|last| last.screen == anchor.screen);
+    let tab = Tab::from_id(item);
     match s.phase {
         Phase::Shown if same_item => close(s, tx),
         // A second click before the panel is up takes the first one back.
         Phase::Opening { .. } if same_item => s.phase = Phase::Hidden,
         // The click that took focus from the panel, on the item it was open under.
         Phase::Hidden if same_item && tx.clock() - s.blur_closed_at < SAME_CLICK_SECONDS => {}
-        _ => open(s, anchor, tab, tx),
+        _ => {
+            s.last_item = Some(item);
+            open(s, anchor, tab, tx);
+        }
     }
 }
 
@@ -539,12 +593,19 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     }
     s.last_anchor = Some(anchor);
     s.now = time::unix_now();
+    reload_config(s);
     s.page = Page::Tab;
-    s.tab = shown_tab(s, tab);
+    match shown_tab(s, tab) {
+        Some(tab) => s.tab = tab,
+        // Every tab is hidden: the settings are where one comes back.
+        None => s.page = Page::Settings,
+    }
     if s.tab.provider().is_some() {
         s.agent_tab = s.tab;
     }
     s.adding = false;
+    s.replacing_key = false;
+    s.confirm_remove_key = false;
     s.hovered = None;
     s.point = None;
     s.trace = None;
@@ -561,6 +622,10 @@ pub fn open(s: &mut Ui, anchor: Anchor, tab: Tab, tx: &mut Tx) {
     }
     s.me.place(DisplayTarget::Primary, OverlayPlacement::Rect { x, y: anchor.y, width: WINDOW_W, height: WINDOW_H });
     s.send(Command::Opened);
+    // The icons of the apps this Mac's tabs list start decoding now, ahead of the first frame.
+    if let Some(view) = s.system.clone() {
+        s.prefetch_icons(&view);
+    }
     if s.drawn_scale.get() == anchor.scale {
         reveal(s, tx);
     } else {
@@ -646,16 +711,73 @@ pub fn apply_system(s: &mut Ui, view: Arc<SystemView>, tx: &mut Tx) -> bool {
     if !shown {
         tx.instant();
     }
-    s.prefetch_icons(&view);
+    // Icons are fetched for an open panel only, and only when the list of apps is a new one:
+    // a panel that is never opened decodes none, and holds none in memory.
+    let same_apps = match (s.system.as_ref().and_then(|last| last.apps.as_ref()), view.apps.as_ref()) {
+        (Some(last), Some(now)) => Arc::ptr_eq(last, now),
+        (None, None) => true,
+        _ => false,
+    };
+    if s.phase != Phase::Hidden && !same_apps {
+        s.prefetch_icons(&view);
+    }
     s.system = Some(view);
     s.sync_system_items();
     shown
 }
 
-/// The tab to show for `tab`: itself while the panel has it, else the Agents tab's agent.
-fn shown_tab(s: &Ui, tab: Tab) -> Tab {
+/// The tab to show for `tab`: itself while the panel has it, else the one it falls back to.
+fn shown_tab(s: &Ui, tab: Tab) -> Option<Tab> {
     let there = if tab.provider().is_some() { s.agents().contains(&tab) } else { s.bar_tabs().contains(&tab) };
-    if there { tab } else { s.current_agent() }
+    if there { Some(tab) } else { s.home_tab() }
+}
+
+/// Moves off a tab the settings just hid, to the one the panel falls back to.
+fn leave_hidden_tab(s: &mut Ui) {
+    let shown = match s.tab.provider() {
+        Some(provider) => s.config.has_tab(provider),
+        None => s.bar_tabs().contains(&s.tab),
+    };
+    if !shown && let Some(tab) = s.home_tab() {
+        s.tab = tab;
+    }
+}
+
+/// Reads `config.json` again when it was edited by hand since it was last read or written
+/// here, so a change made in the file shows the next time the panel opens, and a change made
+/// in the panel never writes over it.
+fn reload_config(s: &mut Ui) {
+    if s.demo {
+        return;
+    }
+    let stamp = config::modified(&s.data_dir);
+    if stamp == s.config_stamp {
+        return;
+    }
+    s.config_stamp = stamp;
+    match config::read(&s.data_dir) {
+        Some(Ok(edited)) if edited != s.config => {
+            s.config = edited;
+            apply_config(s);
+        }
+        Some(Err(reason)) => eprintln!("nerda-bar: config.json is not valid, keeping the settings as they were (kept as config.invalid.json): {reason}"),
+        _ => {}
+    }
+}
+
+/// Puts the settings as they now are into effect everywhere: the menu bar, the sampler, the
+/// worker and the panel's material.
+fn apply_config(s: &mut Ui) {
+    s.material = if s.config.material.eq_ignore_ascii_case("glass") { SystemMaterial::Glass } else { SystemMaterial::Popover };
+    s.send(Command::Every(s.config.refresh_seconds()));
+    for provider in Provider::ALL {
+        s.send(Command::Enabled(provider, s.config.shows(provider)));
+    }
+    leave_hidden_tab(s);
+    s.sync_rate();
+    s.sync_menu_bar();
+    s.sync_system_items();
+    crate::awake::sync_item(s);
 }
 
 /// Shows `tab` in the panel.
@@ -679,8 +801,10 @@ pub fn set_tab(s: &mut Ui, tab: Tab, tx: &mut Tx) {
 
 /// Shows the Agents tab, on the agent it last showed.
 pub fn show_agents(s: &mut Ui, tx: &mut Tx) {
-    let agent = s.current_agent();
-    set_tab(s, agent, tx);
+    if s.agents_enabled() {
+        let agent = s.current_agent();
+        set_tab(s, agent, tx);
+    }
 }
 
 /// Moves the Agents tab `step` agents along, wrapping round.
@@ -699,6 +823,7 @@ fn cycle_agent(s: &mut Ui, step: isize, tx: &mut Tx) -> bool {
 pub fn toggle_adding(s: &mut Ui, tx: &mut Tx) {
     tx.instant();
     s.adding = !s.adding;
+    s.replacing_key = false;
     s.key_error = None;
     if !s.adding {
         s.deepseek_key = TextEdit::new("").secure();
@@ -706,10 +831,52 @@ pub fn toggle_adding(s: &mut Ui, tx: &mut Tx) {
 }
 
 /// Shows the Agents tab with the Add an agent popover open: Settings' Add buttons lead here.
+/// An agent being added gets its tab back if the settings had hidden it.
 pub fn start_adding(s: &mut Ui, tx: &mut Tx) {
+    if !s.config.deepseek_tab {
+        set_agent_tab(s, Provider::DeepSeek, true, tx);
+    }
     show_agents(s, tx);
+    s.page = Page::Tab;
     s.adding = true;
+    s.replacing_key = false;
     s.key_error = None;
+}
+
+/// The same popover, asking for a new DeepSeek key in place of the one there.
+pub fn replace_deepseek_key(s: &mut Ui, tx: &mut Tx) {
+    start_adding(s, tx);
+    s.replacing_key = true;
+    s.deepseek_key = TextEdit::new("").secure();
+}
+
+/// Removes DeepSeek's key from the Keychain, and with it the balance and its history. The
+/// first press asks; the second, on the same button, does it.
+pub fn remove_deepseek_key(s: &mut Ui, tx: &mut Tx) {
+    tx.instant();
+    if !s.confirm_remove_key {
+        s.confirm_remove_key = true;
+        return;
+    }
+    s.confirm_remove_key = false;
+    if !s.demo
+        && let Err(reason) = crate::deepseek::remove_key()
+    {
+        s.key_error = Some(reason);
+        return;
+    }
+    s.key_error = None;
+    s.deepseek = DeepSeek { problem: Some(Problem::SignedOut), ..DeepSeek::default() };
+    s.send(Command::ForgetDeepSeek);
+    leave_hidden_tab(s);
+    if s.tab == Tab::DeepSeek {
+        s.tab = s.current_agent();
+    }
+    s.sync_menu_bar();
+}
+
+pub fn cancel_remove_key(s: &mut Ui) {
+    s.confirm_remove_key = false;
 }
 
 /// Saves the DeepSeek key typed in the Add an agent popover to the Keychain, and reads the
@@ -730,7 +897,13 @@ pub fn add_deepseek_key(s: &mut Ui, tx: &mut Tx) {
     s.key_error = None;
     s.adding = false;
     s.agent_tab = Tab::DeepSeek;
-    s.send(Command::Refresh(Provider::DeepSeek));
+    // Another key is another account: its balance starts its own history.
+    let replaced = std::mem::take(&mut s.replacing_key);
+    if replaced {
+        s.deepseek = DeepSeek::default();
+    }
+    s.send(Command::Enabled(Provider::DeepSeek, true));
+    s.send(if replaced { Command::ForgetDeepSeek } else { Command::Refresh(Provider::DeepSeek) });
     tx.instant();
 }
 
@@ -789,9 +962,7 @@ pub fn set_module_tab(s: &mut Ui, tab: Tab, on: bool, tx: &mut Tx) {
     if let Some(module) = s.module_mut(tab) {
         module.tab = on;
     }
-    if !on && s.tab == tab {
-        s.tab = s.current_agent();
-    }
+    leave_hidden_tab(s);
     save(s);
     s.sync_rate();
 }
@@ -800,9 +971,7 @@ pub fn set_module_tab(s: &mut Ui, tab: Tab, on: bool, tx: &mut Tx) {
 pub fn set_sleep_tab(s: &mut Ui, on: bool, tx: &mut Tx) {
     tx.instant();
     s.config.sleep.tab = on;
-    if !on && s.tab == Tab::Sleep {
-        s.tab = s.current_agent();
-    }
+    leave_hidden_tab(s);
     save(s);
 }
 
@@ -813,10 +982,23 @@ pub fn set_sleep_menu_bar(s: &mut Ui, on: bool) {
     crate::awake::sync_item(s);
 }
 
-fn save(s: &Ui) {
+fn save(s: &mut Ui) {
     if !s.demo {
         config::save(&s.data_dir, &s.config);
+        s.config_stamp = config::modified(&s.data_dir);
     }
+}
+
+/// Hides a measure's tab, for a headless scene.
+pub fn hide_tab_for_scene(s: &mut Ui, tab: Tab) {
+    if let Some(module) = s.module_mut(tab) {
+        module.tab = false;
+    }
+}
+
+/// Writes the settings after a change made outside this file's own setters.
+pub fn save_config(s: &mut Ui) {
+    save(s);
 }
 
 /// Bytes as the panel and the menu bar write them: "13.1 GB", "812 MB".
@@ -952,6 +1134,11 @@ pub fn toggle_settings(s: &mut Ui, tx: &mut Tx) {
     tx.instant();
     s.page = if s.page == Page::Settings { Page::Tab } else { Page::Settings };
     s.adding = false;
+    s.confirm_remove_key = false;
+    // The settings open on the options of the agent the panel was showing.
+    if s.page == Page::Settings && let Some(provider) = s.tab.provider() {
+        s.settings_agent = provider;
+    }
     s.point = None;
     s.sync_rate();
     if s.page == Page::Settings && !s.demo {
@@ -960,38 +1147,70 @@ pub fn toggle_settings(s: &mut Ui, tx: &mut Tx) {
     }
 }
 
-pub fn set_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
-    s.config.menu_bar = metric;
-    if !s.demo {
-        config::save(&s.data_dir, &s.config);
+/// Which limit `provider`'s menu bar item shows.
+pub fn set_menu_bar(s: &mut Ui, provider: Provider, metric: model::MenuBarMetric) {
+    match provider {
+        Provider::Codex => s.config.codex.menu_bar = metric,
+        _ => s.config.menu_bar = metric,
     }
-    s.sync_menu_bar();
-}
-
-pub fn set_codex_menu_bar(s: &mut Ui, metric: model::MenuBarMetric) {
-    s.config.codex.menu_bar = metric;
     save(s);
     s.sync_menu_bar();
 }
 
-pub fn set_codex_show_used(s: &mut Ui, show_used: bool) {
-    s.config.codex.show_used = show_used;
-    save(s);
-    s.sync_menu_bar();
-}
-
-pub fn set_deepseek_menu_bar(s: &mut Ui, on: bool) {
-    s.config.deepseek_menu_bar = on;
-    save(s);
-    s.sync_menu_bar();
-}
-
-pub fn set_menu_bar_models(s: &mut Ui, on: bool) {
-    s.config.menu_bar_models = on;
-    if !s.demo {
-        config::save(&s.data_dir, &s.config);
+/// Whether `provider`'s menu bar item also shows each model's own limit.
+pub fn set_menu_bar_models(s: &mut Ui, provider: Provider, on: bool) {
+    match provider {
+        Provider::Codex => s.config.codex.models = on,
+        _ => s.config.menu_bar_models = on,
     }
+    save(s);
     s.sync_menu_bar();
+}
+
+/// Whether `provider` has an item in the menu bar. An agent that shows nowhere is not read.
+pub fn set_agent_menu_bar(s: &mut Ui, provider: Provider, on: bool) {
+    s.config.set_in_menu_bar(provider, on);
+    save(s);
+    s.send(Command::Enabled(provider, s.config.shows(provider)));
+    s.sync_menu_bar();
+}
+
+/// Whether `provider` has a tab in the panel.
+pub fn set_agent_tab(s: &mut Ui, provider: Provider, on: bool, tx: &mut Tx) {
+    tx.instant();
+    s.config.set_tab(provider, on);
+    leave_hidden_tab(s);
+    save(s);
+    s.send(Command::Enabled(provider, s.config.shows(provider)));
+}
+
+/// The agent whose options the settings show.
+pub fn set_settings_agent(s: &mut Ui, provider: Provider, tx: &mut Tx) {
+    tx.instant();
+    s.settings_agent = provider;
+    s.confirm_remove_key = false;
+}
+
+/// Minutes between refreshes of every agent.
+pub fn set_refresh_minutes(s: &mut Ui, minutes: u32) {
+    s.config.refresh_minutes = minutes;
+    save(s);
+    s.send(Command::Every(s.config.refresh_seconds()));
+}
+
+/// The amount under which DeepSeek's balance reads as a warning; 0 for never.
+pub fn set_deepseek_warn_below(s: &mut Ui, amount: f64) {
+    s.config.deepseek_warn_below = amount;
+    save(s);
+    s.sync_menu_bar();
+}
+
+/// The panel's material: Liquid Glass, or frosted vibrancy.
+pub fn set_material(s: &mut Ui, glass: bool, tx: &mut Tx) {
+    tx.instant();
+    s.config.material = if glass { "glass" } else { "popover" }.to_owned();
+    s.material = if glass { SystemMaterial::Glass } else { SystemMaterial::Popover };
+    save(s);
 }
 
 pub fn set_launch_at_login(s: &mut Ui, on: bool) {
@@ -1012,23 +1231,21 @@ pub fn open_settings_file(s: &mut Ui, tx: &mut Tx) {
     close(s, tx);
 }
 
-/// Switches every percentage between what is used and what is left, and remembers it.
-pub fn set_show_used(s: &mut Ui, show_used: bool) {
-    if shown_provider(s) == Provider::Codex && s.page == Page::Tab {
-        s.config.codex.show_used = show_used;
-    } else {
-        s.config.show_used = show_used;
+/// Switches `provider`'s percentages between what is used and what is left, in the panel and
+/// in its menu bar item, and remembers it.
+pub fn set_provider_show_used(s: &mut Ui, provider: Provider, show_used: bool) {
+    match provider {
+        Provider::Codex => s.config.codex.show_used = show_used,
+        _ => s.config.show_used = show_used,
     }
-    if !s.demo {
-        config::save(&s.data_dir, &s.config);
-        status_item::set_show_used(show_used);
-    }
+    save(s);
     s.sync_menu_bar();
 }
 
 pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
         Key::Escape if s.adding => toggle_adding(s, tx),
+        Key::Escape if s.confirm_remove_key => cancel_remove_key(s),
         Key::Escape if matches!(s.reset, ResetFlow::Confirm(_) | ResetFlow::Failed { .. }) => crate::agents::cancel_reset(s),
         Key::Escape if s.page == Page::Settings => toggle_settings(s, tx),
         Key::Escape => close(s, tx),
@@ -1036,7 +1253,7 @@ pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Command('r') => refresh(s),
         Key::Command('q') => tx.quit(),
         // ⌘1: the agents. ⌘2, ⌘3…: the top bar's tabs after it, in its order.
-        Key::Command('1') => show_agents(s, tx),
+        Key::Command('1') if s.agents_enabled() => show_agents(s, tx),
         Key::Command(c @ '2'..='9') => match s.bar_tabs().get(*c as usize - '2' as usize) {
             Some(&tab) => set_tab(s, tab, tx),
             None => return false,
@@ -1186,12 +1403,12 @@ mod tests {
     fn a_click_that_closed_the_panel_does_not_reopen_it() {
         let mut rt = runtime();
         let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
-        rt.state.last_anchor = Some(anchor);
+        (rt.state.last_anchor, rt.state.last_item) = (Some(anchor), Some("claude"));
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Hidden);
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Hidden);
     }
@@ -1202,7 +1419,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
     }
@@ -1213,7 +1430,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert!(matches!(rt.state.phase, Phase::Opening { .. }), "still hidden: its frame is for the other scale");
         // Not yet drawn at the new scale: it keeps waiting.
@@ -1235,22 +1452,22 @@ mod tests {
         rt.frame(1.0 / 60.0);
         let here = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
         let there = Anchor { x: 2900.0, y: 30.0, screen: [1512.0, 3432.0], scale: 2.0 };
-        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, here, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
         // The click on the other item first takes focus from the panel, then arrives.
         rt.state.demo = false;
         rt.update(|s, tx| on_focus(s, false, tx));
-        rt.update(move |s, tx| toggle(s, there, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, there, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
         assert_eq!(rt.state.last_anchor, Some(there));
         // And with the panel still open, the same.
-        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, here, "claude", tx));
         rt.frame(1.0 / 60.0);
         assert_eq!((rt.state.phase, rt.state.last_anchor), (Phase::Shown, Some(here)));
         // A click on the item it is open under closes it.
-        rt.update(move |s, tx| toggle(s, here, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, here, "claude", tx));
         assert_eq!(rt.state.phase, Phase::Hidden);
     }
 
@@ -1260,7 +1477,7 @@ mod tests {
         rt.update(close);
         rt.frame(1.0 / 60.0);
         let anchor = Anchor { x: -400.0, y: 30.0, screen: [-1080.0, 0.0], scale: 1.0 };
-        rt.update(move |s, tx| toggle(s, anchor, Tab::Claude, tx));
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
         rt.update(|s, tx| { poll(s, 10.0, tx); });
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.phase, Phase::Shown);
@@ -1530,5 +1747,171 @@ mod tests {
         assert_eq!(rt.state.claude.snapshot, before);
         assert!(rt.state.claude.problem.is_some());
         assert!(rt.presented("problem").is_some());
+    }
+
+    #[test]
+    fn a_click_on_the_item_that_moved_along_the_menu_bar_still_closes_the_panel() {
+        let mut rt = runtime();
+        rt.update(close);
+        rt.frame(1.0 / 60.0);
+        let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
+        rt.update(move |s, tx| toggle(s, anchor, "memory", tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.phase, rt.state.tab), (Phase::Shown, Tab::Memory));
+        // A neighbour's number grew a digit: the item now sits four points along.
+        let moved = Anchor { x: 904.0, ..anchor };
+        rt.update(move |s, tx| toggle(s, moved, "memory", tx));
+        assert_eq!(rt.state.phase, Phase::Hidden, "the same item closes the panel, wherever it is now");
+        // Another item at the very same place opens it on its own tab.
+        rt.update(move |s, tx| toggle(s, moved, "cpu", tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.phase, rt.state.tab), (Phase::Shown, Tab::Cpu));
+    }
+
+    #[test]
+    fn each_providers_percentages_switch_on_their_own() {
+        let mut rt = runtime();
+        // As an item's menu does it: by the provider, whatever tab the panel is on.
+        rt.update(|s, _| set_provider_show_used(s, Provider::Codex, true));
+        assert!(rt.state.config.codex.show_used && !rt.state.config.show_used, "Codex's menu leaves Claude's as it was");
+        rt.update(|s, tx| set_tab(s, Tab::Codex, tx));
+        rt.update(|s, _| set_provider_show_used(s, Provider::Claude, true));
+        assert!(rt.state.config.show_used, "and Claude's is switched from Codex's tab");
+    }
+
+    #[test]
+    fn every_agent_has_a_menu_bar_switch_a_tab_switch_and_its_options() {
+        let mut rt = runtime();
+        click(&mut rt, "tab-settings");
+        for provider in Provider::ALL {
+            for key in [format!("settings-{}", provider.id()), format!("{}-in-menu-bar", provider.id()), format!("{}-has-tab", provider.id()), format!("options-{}", provider.id())] {
+                assert!(rt.presented(&key).is_some(), "{key} is in the settings");
+            }
+        }
+        click(&mut rt, "claude-in-menu-bar");
+        assert!(!rt.state.config.claude_in_menu_bar && rt.state.config.shows(Provider::Claude), "off the menu bar, Claude keeps its tab");
+        click(&mut rt, "codex-in-menu-bar");
+        click(&mut rt, "codex-has-tab");
+        assert!(!rt.state.config.shows(Provider::Codex), "with neither, Codex is not read");
+        assert!(!rt.state.agents().contains(&Tab::Codex));
+        // Each agent's own options, picked at the group's end.
+        click(&mut rt, "options-codex");
+        assert_eq!(rt.state.settings_agent, Provider::Codex);
+        click(&mut rt, "codex-menu-bar-Weekly");
+        click(&mut rt, "codex-percent-Used");
+        click(&mut rt, "codex-menu-bar-models");
+        let codex = rt.state.config.codex;
+        assert_eq!((codex.menu_bar, codex.show_used, codex.models), (model::MenuBarMetric::Weekly, true, true));
+        assert_eq!(rt.state.config.menu_bar, model::MenuBarMetric::Session, "Claude's stay as they were");
+        click(&mut rt, "options-deepseek");
+        click(&mut rt, "deepseek-warn-5");
+        assert_eq!(rt.state.config.deepseek_warn_below, 5.0);
+        click(&mut rt, "refresh-every-15");
+        assert_eq!(rt.state.config.refresh_seconds(), 900);
+        click(&mut rt, "material-Glass");
+        assert_eq!((rt.state.config.material.as_str(), rt.state.material), ("glass", SystemMaterial::Glass));
+        let [_, _, _, h] = rt.presented("panel").unwrap().0;
+        assert_eq!(h, PANEL_H);
+    }
+
+    #[test]
+    fn deepseeks_key_is_removed_only_after_the_question() {
+        let mut rt = runtime();
+        click(&mut rt, "tab-settings");
+        click(&mut rt, "options-deepseek");
+        assert!(rt.presented("deepseek-key-replace").is_some());
+        click(&mut rt, "deepseek-key-remove");
+        assert!(rt.state.confirm_remove_key && rt.state.deepseek.ledger.is_some(), "the first press only asks");
+        click(&mut rt, "deepseek-key-keep");
+        assert!(!rt.state.confirm_remove_key && rt.state.deepseek.ledger.is_some());
+        click(&mut rt, "deepseek-key-remove");
+        click(&mut rt, "deepseek-key-remove");
+        assert!(rt.state.deepseek.ledger.is_none() && !rt.state.connected(Provider::DeepSeek));
+        assert!(rt.presented("settings-add-deepseek").is_some(), "with no key, the row offers to add one");
+        // Replace opens the popover on a field, though a key is there.
+        rt.update(|s, tx| {
+            tx.instant();
+            crate::demo::fill(s);
+            replace_deepseek_key(s, tx);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.adding && rt.state.replacing_key && rt.presented("deepseek-key").is_some());
+    }
+
+    #[test]
+    fn with_every_agent_tab_off_the_panel_is_this_macs() {
+        let mut rt = runtime();
+        click(&mut rt, "tab-settings");
+        for provider in Provider::ALL {
+            click(&mut rt, &format!("{}-has-tab", provider.id()));
+        }
+        assert!(!rt.state.agents_enabled());
+        assert_eq!(rt.state.tab, Tab::Cpu, "the panel moves to the first tab left");
+        assert!(rt.presented("tab-agents").is_none() && rt.presented("tab-cpu").is_some());
+        rt.key(KeyEvent { key: Key::Command('1'), mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.tab, Tab::Cpu, "⌘1 has no agents to show");
+        // A click on an agent's menu bar item opens the panel on what it does show.
+        rt.update(close);
+        let anchor = Anchor { x: 900.0, y: 30.0, screen: [0.0, 1512.0], scale: 2.0 };
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.phase, rt.state.page, rt.state.tab), (Phase::Shown, Page::Tab, Tab::Cpu));
+        // With this Mac's tabs and Sleep off too, the panel opens on the settings.
+        rt.update(|s, tx| {
+            tx.instant();
+            for tab in Tab::SYSTEM {
+                hide_tab_for_scene(s, tab);
+            }
+            s.config.sleep.tab = false;
+            close(s, tx);
+        });
+        rt.update(move |s, tx| toggle(s, anchor, "claude", tx));
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rt.state.phase, rt.state.page), (Phase::Shown, Page::Settings));
+        click(&mut rt, "tab-settings");
+        assert!(rt.presented("no-tabs").is_some() && rt.presented("open-settings").is_some(), "and behind them, the way back");
+    }
+
+    #[test]
+    fn limits_from_before_a_sign_out_say_so() {
+        let mut rt = runtime();
+        rt.update(|s, tx| apply(s, Event::Limits(Provider::Claude, Err(Problem::SignedOut)), tx));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.claude.snapshot.is_some(), "a login that can't be read for a moment keeps the limits");
+        assert!(rt.presented("problem").is_some() && rt.presented("limit-weekly").is_some(), "with why they are not current");
+    }
+
+    #[test]
+    fn sleep_that_is_off_for_no_session_offers_to_turn_it_on() {
+        let mut rt = runtime();
+        rt.update(|s, tx| {
+            tx.instant();
+            set_tab(s, Tab::Sleep, tx);
+            // Sleep is off and no flag says an earlier run did it: the button is still there.
+            if let Some(view) = &mut s.awake.view {
+                Arc::make_mut(view).sleep_disabled = true;
+            }
+        });
+        rt.frame(1.0);
+        assert!(!rt.state.awake.left_off && rt.presented("allow-sleep").is_some());
+        // While this app's own session holds the lid, sleep being off is as asked.
+        click(&mut rt, "keep-lid");
+        click(&mut rt, "duration-1h");
+        // The banner leaves over a moment: look once it has.
+        rt.frame(5.0);
+        assert!(rt.presented("allow-sleep").is_none());
+        click(&mut rt, "duration-off");
+        rt.frame(10.0);
+        assert!(rt.presented("allow-sleep").is_none(), "ending the session turned sleep back on");
+    }
+
+    #[test]
+    fn the_keep_awake_counts_minutes_up_everywhere() {
+        // One second short of five hours reads "5:00" in the ring, as the status reads "5h".
+        assert_eq!(crate::awake::left_words(5 * 3600 - 10), "5h");
+        let left = 5 * 3600 - 10;
+        let minutes_left = (left + 59) / 60;
+        assert_eq!(format!("{}:{:02}", minutes_left / 60, minutes_left % 60), "5:00");
     }
 }

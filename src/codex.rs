@@ -179,6 +179,8 @@ fn window_label(seconds: i64) -> String {
     match seconds {
         WEEK => "Weekly".to_owned(),
         86_400 => "Daily".to_owned(),
+        s if (28 * 86_400..=31 * 86_400).contains(&s) => "Monthly".to_owned(),
+        s if s % 86_400 == 0 => format!("{}-day", s / 86_400),
         s if s % 3600 == 0 => format!("{}-hour", s / 3600),
         s => format!("{}-minute", s / 60),
     }

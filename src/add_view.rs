@@ -64,6 +64,21 @@ pub fn no_agents(s: &Ui, l: &Look) -> Screen {
     Screen { context, body }
 }
 
+/// The Agents tab's place when the settings hide every tab: what happened, and the way back.
+pub fn no_tabs(l: &Look) -> Screen {
+    let context = look::context_bar(l, look::context_title(l, "Nerda Bar", None, Some("Every tab is hidden".to_owned())), None);
+    let body = col().key("no-tabs").w_full().h(BODY_H).center().child(
+        col()
+            .w(440.0)
+            .gap(12.0)
+            .items_center()
+            .child(text("Every tab is hidden").font(look::figure(22.0)).color(l.text))
+            .child(text("Switch a tab back on in Settings.").font(font(13.0, 400.0)).color(l.dim))
+            .child(look::button(l, "open-settings", "Open Settings").on_press_tx(ui::toggle_settings)),
+    );
+    Screen { context, body }
+}
+
 /// The Add an agent popover over the panel, under the context bar's +: every provider, the
 /// added ones marked, a way to add each of the others. A click outside it closes it.
 pub fn popover(s: &Ui, l: &Look) -> El {
@@ -92,7 +107,7 @@ pub fn popover(s: &Ui, l: &Look) -> El {
                 .child(trailing),
         );
     }
-    card = card.child(deepseek(s, l, agents.contains(&Tab::DeepSeek)));
+    card = card.child(deepseek(s, l, s.connected(Provider::DeepSeek) && !s.replacing_key));
     let popover = col()
         .key("add-popover")
         .absolute(12.0, 2.0 * BAR_H + 4.0)
@@ -106,7 +121,7 @@ pub fn popover(s: &Ui, l: &Look) -> El {
         .shadow(12.0, 32.0, Color::BLACK.alpha(if l.dark { 0.45 } else { 0.18 }))
         // Presses inside stay inside.
         .on_press(|_: &mut Ui| {})
-        .child(col().px(4.0).gap(2.0).child(text("Add an agent").font(font(13.0, 600.0)).color(l.text)).child(caption(l, "Signed-in agents are added for you.")))
+        .child(col().px(4.0).gap(2.0).child(text(if s.replacing_key { "Replace DeepSeek's key" } else { "Add an agent" }).font(font(13.0, 600.0)).color(l.text)).child(caption(l, if s.replacing_key { "The new key is saved to your Keychain." } else { "Signed-in agents are added for you." })))
         .child(card);
     el().key("add-backdrop").absolute(0.0, 0.0).size(PANEL_W, PANEL_H).on_press_tx(ui::toggle_adding).child(popover)
 }
@@ -153,9 +168,10 @@ fn deepseek(s: &Ui, l: &Look, added: bool) -> El {
         .fill(l.normal)
         .press_scale(0.96)
         .on_press_tx(ui::add_deepseek_key)
-        .child(text("Add").font(font(11.0, 600.0)).color(Color::WHITE));
+        .child(text(if s.replacing_key { "Replace" } else { "Add" }).font(font(11.0, 600.0)).color(Color::WHITE));
     let (note, note_color) = match &s.key_error {
         Some(reason) => (reason.clone(), l.critical_text),
+        None if s.replacing_key => ("Takes the place of the key there. The balance starts a new history.".to_owned(), l.faint),
         None => ("Kept in your Keychain as \u{201c}Nerda Bar\u{201d}.".to_owned(), l.faint),
     };
     col()
@@ -163,7 +179,7 @@ fn deepseek(s: &Ui, l: &Look, added: bool) -> El {
         .w_full()
         .padding(10.0)
         .gap(8.0)
-        .child(head.child(caption(l, "API key")))
+        .child(head.child(caption(l, if s.replacing_key { "New API key" } else { "API key" })))
         .child(field)
         .child(row().w_full().gap(8.0).center_y().child(text(note).font(font(11.0, 400.0)).color(note_color).w_full().wrap().grow(1.0).min_w(0.0)).child(add))
 }

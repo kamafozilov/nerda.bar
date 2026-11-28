@@ -58,7 +58,7 @@ impl Ledger {
         if std::fs::create_dir_all(dir).is_ok()
             && let Ok(text) = serde_json::to_string(self)
         {
-            let _ = std::fs::write(dir.join(FILE), text);
+            let _ = crate::config::write_file(dir, FILE, &text);
         }
     }
 
@@ -91,8 +91,10 @@ impl Ledger {
         let days = self.days(now, 7);
         let spent: f64 = days.iter().map(|day| day.spent).sum();
         let first = self.readings.first()?.0;
-        // Only as many days as there are readings for.
-        let span = ((now - first.max(now - 7 * 86_400)) as f64 / 86_400.0).max(1.0);
+        // Over the time the sum covers: from the first of the seven days, or from the first
+        // reading when that came later, and never under a day.
+        let from = days.first().map_or(now, |day| day.start).max(first);
+        let span = ((now - from) as f64 / 86_400.0).max(1.0);
         (spent > 0.0).then(|| spent / span)
     }
 }
@@ -136,6 +138,32 @@ pub fn save_key(key: &str) -> Result<(), String> {
     let output = child.wait_with_output().map_err(|e| format!("Couldn't reach the Keychain: {e}."))?;
     let said = String::from_utf8_lossy(&output.stderr);
     if output.status.success() && said.trim().is_empty() { Ok(()) } else { Err("The Keychain didn't save the key.".to_owned()) }
+}
+
+/// Removes the Keychain item [`key`] reads. No item there is not a failure.
+pub fn remove_key() -> Result<(), String> {
+    let output = Command::new("/usr/bin/security")
+        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Couldn't open the Keychain: {e}."))?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || said.contains("could not be found") { Ok(()) } else { Err("The Keychain didn't remove the key.".to_owned()) }
+}
+
+/// How the balance reads: critical once it no longer covers API calls, a warning under
+/// `warn_below` (0 never warns).
+pub fn severity(balance: &Balance, warn_below: f64) -> crate::model::Severity {
+    use crate::model::Severity;
+    if !balance.available {
+        Severity::Critical
+    } else if warn_below > 0.0 && balance.total < warn_below {
+        Severity::Warning
+    } else {
+        Severity::Normal
+    }
 }
 
 pub fn fetch(agent: &ureq::Agent) -> Result<Balance, Problem> {

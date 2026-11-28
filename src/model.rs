@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::time;
 
 /// A service whose plan or account the panel reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -209,15 +208,6 @@ impl Problem {
             Problem::RateLimited { .. } => "Updates paused",
             Problem::Offline(_) => "Offline",
             Problem::Failed(_) => "Couldn't update",
-        }
-    }
-
-    pub fn detail(&self, now: i64) -> String {
-        match self {
-            Problem::SignedOut => "Run `claude` in a terminal and sign in. Nerda Bar reads that login.".to_owned(),
-            Problem::LoginExpired => "Run `claude` once to renew it; the limits come back within a minute. Nerda Bar never changes your login.".to_owned(),
-            Problem::RateLimited { until } => format!("Claude asked for a pause. Trying again in {}.", time::span(until - now)),
-            Problem::Offline(reason) | Problem::Failed(reason) => reason.clone(),
         }
     }
 }

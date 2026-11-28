@@ -1,11 +1,14 @@
-//! The Sleep tab. On the left, what can be done for a while: keep this Mac awake for a length
-//! of time or until turned off, with its display on or not and its lid closed or not, and the
-//! apps that keep it awake already. On the right, what macOS does on its own: when the display
-//! turns off and the Mac sleeps on each power source, the lid and the last sleep and wake, and
-//! putting the display, the Mac or the screen to sleep now.
+//! The Sleep tab. Its context bar says in a sentence what this Mac will do now, with
+//! everything counted in. On the left, what is temporary and needs no password: keeping this
+//! Mac awake for a length of time or until turned off, with its display on or not and its lid
+//! closed or not, and the other apps that keep it awake already. On the right, what is
+//! permanent: macOS's own settings for when the display turns off and the Mac sleeps on each
+//! power source, then the lid and the last sleep and wake, and what can be done at once:
+//! display off, sleep, lock.
 //!
-//! Like every tab, its regions have known heights: the fixed sections add up, and the two
-//! lists (the apps holding sleep off, the lid and wake) show as many rows as fit.
+//! Every control says what it does where it is, not only in a tooltip. Like every tab, its
+//! regions have known heights: the fixed sections add up, and the two lists (the apps holding
+//! sleep off, the lid and wake) show as many rows as fit.
 
 use rune::{Color, El, Icon, LineCap, Path, Shape, canvas, col, el, icon, row, spacer, text};
 
@@ -35,7 +38,7 @@ const TIMER_CHOICES: [u32; 6] = [2, 5, 10, 30, 60, 0];
 
 pub fn screen(s: &Ui, l: &Look) -> Screen {
     let view = s.awake.view.as_deref();
-    let title = look::context_title(l, "Sleep", None, view.map(|view| summary(view)));
+    let title = look::context_title(l, "Sleep", None, view.map(|view| verdict(s, view)));
     let context = look::context_bar(l, title, Some(status(s, l, view)));
     let banner = banner(s, l);
     let height = BODY_H - if banner.is_some() { BANNER_H } else { 0.0 };
@@ -50,25 +53,42 @@ pub fn screen(s: &Ui, l: &Look) -> Screen {
     Screen { context, body: body.child(look::columns_in(l, height, left.key("sleep-left"), right.key("sleep-right"))) }
 }
 
-/// The context bar's quiet line: the power source and its timers.
-fn summary(view: &PowerView) -> String {
+/// The context bar's line: what this Mac does now, with everything counted in. A keep-awake
+/// comes first, then sleep switched off, then other apps holding it awake, then its own timer.
+fn verdict(s: &Ui, view: &PowerView) -> String {
+    if let Some(session) = &s.awake.session {
+        let until = match session.until {
+            Some(until) => format!("until {}", time::clock(until, false)),
+            None => "until you turn Keep awake off".to_owned(),
+        };
+        let lid = match (view.lid, session.lid == LidHold::On && view.sleep_disabled) {
+            (None, _) => "",
+            (Some(_), true) => ", lid closed too",
+            (Some(_), false) => "; closing the lid still sleeps it",
+        };
+        return format!("Now: stays awake {until}{lid}");
+    }
+    if s.awake.sleep_stuck_off(s.now) {
+        return "Now: sleep is switched off, so it stays awake even with the lid closed".to_owned();
+    }
+    if let Some(first) = view.holders.first() {
+        let who = match view.holders.len() - 1 {
+            0 => format!("{} keeps", first.name),
+            1 => format!("{} and 1 more app keep", first.name),
+            others => format!("{} and {others} more apps keep", first.name),
+        };
+        return format!("Now: won't sleep while {who} it awake");
+    }
     let source = view.source();
     let on = match source {
-        Source::Battery => "On battery",
-        Source::Adapter => "On power adapter",
+        Source::Battery => "on battery",
+        Source::Adapter => "on power adapter",
     };
-    let Some(timers) = view.timers(source).filter(|_| view.timers_read) else { return on.to_owned() };
-    let display = match timers.display {
-        Some(0) => Some("display stays on".to_owned()),
-        Some(m) => Some(format!("display off after {}", minutes(m))),
-        None => None,
-    };
-    let sleep = match timers.sleep {
-        Some(0) => Some("never sleeps idle".to_owned()),
-        Some(m) => Some(format!("sleeps after {}", minutes(m))),
-        None => None,
-    };
-    [Some(on.to_owned()), display, sleep].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    match view.timers(source).filter(|_| view.timers_read).and_then(|timers| timers.sleep) {
+        Some(0) => format!("Now: never sleeps when idle {on}"),
+        Some(m) => format!("Now: sleeps after {} idle {on}", minutes(m)),
+        None => format!("Now: sleeps when idle {on}"),
+    }
 }
 
 /// The context bar's status: whether this Mac is kept awake, and by whom.
@@ -84,7 +104,7 @@ fn status(s: &Ui, l: &Look, view: Option<&PowerView>) -> El {
         };
         return look::pill("sleep-status", l.good_text, words).help(help);
     }
-    if s.awake.left_off || view.is_some_and(|view| view.sleep_disabled) {
+    if s.awake.sleep_stuck_off(s.now) {
         return look::pill("sleep-status", l.warning_text, "Sleep is off".to_owned()).help("This Mac won't sleep, not even with its lid closed");
     }
     let others = view.map_or(0, |view| view.holders.len());
@@ -115,10 +135,11 @@ fn banner(s: &Ui, l: &Look) -> Option<El> {
             .child(text(detail).font(font(12.0, 400.0)).color(l.dim).truncate().grow(1.0).min_w(0.0))
             .child(button)
     };
-    if s.awake.left_off && s.awake.session.is_none() {
+    if s.awake.sleep_stuck_off(s.now) {
         let asking = s.awake.asking == Some(awake::Asking::AllowSleep);
         let button = look::button(l, "allow-sleep", if asking { "Waiting…" } else { "Turn sleep on" }).opacity(if asking { 0.6 } else { 1.0 }).on_press(awake::allow_sleep);
-        return Some(strip(&icons::TRIANGLE_ALERT, "Sleep is off", "An earlier session left it off: closing the lid won't sleep this Mac.".to_owned(), button));
+        let why = if s.awake.left_off { "An earlier keep-awake left it off: closing the lid won't sleep this Mac." } else { "This Mac won't sleep, not even with its lid closed." };
+        return Some(strip(&icons::TRIANGLE_ALERT, "Sleep is off", why.to_owned(), button));
     }
     let error = s.awake.error.clone()?;
     Some(strip(&icons::TRIANGLE_ALERT, "Not changed", error, look::button(l, "dismiss-error", "Dismiss").on_press(awake::dismiss_error)))
@@ -135,17 +156,18 @@ fn left_column(s: &Ui, l: &Look, view: &PowerView, height: f32) -> El {
 fn keep_awake(s: &Ui, l: &Look) -> El {
     let session = s.awake.session.as_ref();
     let left = s.awake.left(s.now);
-    let display = if s.config.sleep.display { "display stays on" } else { "display may turn off" };
     let (number, unit, line, share, color) = match session {
         Some(session) => match (session.until, left) {
             (Some(until), Some(left)) => {
-                let (number, unit) = if left >= 3600 { (format!("{}:{:02}", left / 3600, left % 3600 / 60), "hours left") } else { (((left + 59) / 60).max(1).to_string(), "min left") };
+                // Minutes rounded up, as the menu bar and the status count them.
+                let minutes_left = ((left + 59) / 60).max(1);
+                let (number, unit) = if left >= 3600 { (format!("{}:{:02}", minutes_left / 60, minutes_left % 60), "hours left") } else { (minutes_left.to_string(), "min left") };
                 let total = (until - session.started).max(1) as f64;
-                (number, unit, format!("Until {} · {display}", time::clock(until, false)), left as f64 / total, l.normal)
+                (number, unit, format!("Until {}, then it sleeps on its own", time::clock(until, false)), left as f64 / total, l.normal)
             }
-            _ => ("On".to_owned(), "until you turn it off", format!("Since {} · {display}", time::clock(session.started, false)), 1.0, l.good),
+            _ => ("On".to_owned(), "until you turn it off", "Pick Off to let it sleep again".to_owned(), 1.0, l.good),
         },
-        None => ("Off".to_owned(), "sleeps as set", "Pick how long to keep this Mac awake".to_owned(), 0.0, l.normal),
+        None => ("Off".to_owned(), "not kept awake", "Pick a time to stop this Mac sleeping".to_owned(), 0.0, l.normal),
     };
     let ring = row()
         .key("awake-ring")
@@ -169,13 +191,16 @@ fn keep_awake(s: &Ui, l: &Look) -> El {
         .child(text(line).key("awake-line").font(digits(12.0, 400.0)).color(l.dim).truncate().min_w(0.0));
     let picked = session.map(|session| session.minutes);
     let mut durations = segments(l, "durations").w_full();
-    durations = durations.child(segment(l, "duration-off".to_owned(), "Off", picked.is_none(), |s: &mut Ui| awake::pick(s, None)).grow(1.0).px(0.0));
+    durations = durations.child(segment(l, "duration-off".to_owned(), "Off", picked.is_none(), |s: &mut Ui| awake::pick(s, None)).grow(1.0).px(0.0).help("Lets this Mac sleep on its own again"));
     for (minutes, label) in DURATIONS {
-        let help = if minutes == 0 { "Until you turn it off".to_owned() } else { format!("For {}", self::minutes(minutes)) };
+        let help = if minutes == 0 { "Keeps it awake until you pick Off".to_owned() } else { format!("Keeps it awake for {}, then lets it sleep again", self::minutes(minutes)) };
         durations = durations.child(segment(l, format!("duration-{label}"), label, picked == Some(minutes), move |s: &mut Ui| awake::pick(s, Some(minutes))).grow(1.0).px(0.0).help(help));
     }
-    let end = session.map(|session| caption(l, format!("Since {}", time::clock(session.started, false))));
-    section("keep-awake").child(section_title(l, "Keep awake", end)).child(row().w_full().h(RING).gap(16.0).center_y().child(ring).child(words)).child(durations)
+    let end = match session {
+        Some(session) => caption(l, format!("Since {}", time::clock(session.started, false))),
+        None => caption(l, "Temporary · no password"),
+    };
+    section("keep-awake").child(section_title(l, "Keep awake", Some(end))).child(row().w_full().h(RING).gap(16.0).center_y().child(ring).child(words)).child(durations)
 }
 
 /// A ring filled to `share` from twelve o'clock, as the limits' rings are.
@@ -202,24 +227,32 @@ fn ring(l: &Look, share: f64, color: Color) -> El {
 }
 
 /// What a keep-awake keeps on: the display, and on a notebook, the Mac with its lid closed.
+/// Each switch says under its name what it does as it now stands.
 fn while_awake(s: &Ui, l: &Look, view: &PowerView) -> El {
+    let running = s.awake.session.is_some();
     let display = s.config.sleep.display;
+    let display_note = match (display, running) {
+        (true, true) => "The screen stays lit until this ends",
+        (true, false) => "The screen stays lit too",
+        (false, _) => "The screen may turn off; the Mac keeps working",
+    };
     let display_switch = switch(l, "keep-display", "Keep the display on", display, true).on_press(move |s: &mut Ui| awake::set_display(s, !display));
-    let mut card = col().w_full().radius(10.0).continuous_corners().fill(l.card).child(option(l, "option-display", &icons::MONITOR, "Keep the display on", "Off lets it turn off; apps keep running".to_owned(), display_switch));
+    let mut card = col().w_full().radius(10.0).continuous_corners().fill(l.card).child(option(l, "option-display", &icons::MONITOR, "Keep the display on", display_note.to_owned(), display_switch));
     if view.lid.is_some() {
         let lid = s.config.sleep.lid;
         let note = match s.awake.session.as_ref().map(|session| session.lid) {
-            Some(LidHold::Asking) => "Waiting for your password…".to_owned(),
+            Some(LidHold::Asking) => "Waiting for your password…",
             // What macOS reads, not what was asked: the watcher may still be starting.
-            Some(LidHold::On) if view.sleep_disabled => "Sleep is off until this ends".to_owned(),
-            Some(LidHold::On) => "Turning sleep off…".to_owned(),
-            _ if lid => "Asks for your password when it starts".to_owned(),
-            _ => "Asks for your password · uses more battery".to_owned(),
+            Some(LidHold::On) if view.sleep_disabled => "Lid closed, it stays awake until this ends",
+            Some(LidHold::On) => "Turning sleep off…",
+            _ if lid => "Asks your password when a keep-awake starts",
+            _ => "Off: closing the lid sleeps the Mac",
         };
         let lid_switch = switch(l, "keep-lid", "Stay awake with the lid closed", lid, true).on_press(move |s: &mut Ui| awake::set_lid(s, !lid));
-        card = card.child(option(l, "option-lid", &icons::LAPTOP_LID, "Stay awake with the lid closed", note, lid_switch).border_sides([1.0, 0.0, 0.0, 0.0], l.stroke));
+        card = card.child(option(l, "option-lid", &icons::LAPTOP_LID, "Stay awake with the lid closed", note.to_owned(), lid_switch).border_sides([1.0, 0.0, 0.0, 0.0], l.stroke));
     }
-    next_section(l, "while-awake").child(section_title(l, "While kept awake", None)).child(card)
+    let scope = if running { "Apply to this keep-awake now" } else { "For the next keep-awake" };
+    next_section(l, "while-awake").child(section_title(l, "Keep-awake options", Some(caption(l, scope)))).child(card)
 }
 
 /// A switch in a card: its icon, its name and what it means under it, and the switch.
@@ -238,10 +271,10 @@ fn option(l: &Look, key: &'static str, glyph: &'static Icon, name: &str, note: S
 
 /// The apps holding sleep off, as many as fit, the longest-held first.
 fn holders(s: &Ui, l: &Look, view: &PowerView, height: f32) -> El {
-    let list = next_section(l, "holders").h(height).child(section_title(l, "Keeping it awake", Some(caption(l, "Apps that stop it sleeping"))));
+    let list = next_section(l, "holders").h(height).child(section_title(l, "Also keeping it awake", Some(caption(l, "Apps that stop it sleeping now"))));
     if view.holders.is_empty() {
         let room = rest(height, &[TITLE_H]).min(TALL_ROW_H + 12.0);
-        let empty = crate::agents_view::empty_card(l, "Nothing keeps this Mac awake now", "It sleeps when idle, as set on the right", room).key("holders-empty");
+        let empty = crate::agents_view::empty_card(l, "No app is keeping this Mac awake", "It sleeps on its own, as set under When idle", room).key("holders-empty");
         return list.child(empty);
     }
     let room = rest(height, &[TITLE_H]);
@@ -323,32 +356,41 @@ fn when_idle(s: &Ui, l: &Look, view: &PowerView) -> (El, f32) {
         rows.child(if count > 1 { setting.border_sides([1.0, 0.0, 0.0, 0.0], l.stroke) } else { setting })
     };
     if let Some(display) = timers.display {
-        rows = add(rows, idle_row(l, "Display off", "How long idle before the display turns off", minutes_choices(l, "display-after", source, display, Setting::Display)));
+        rows = add(rows, idle_row(l, "Display off after", None, "How long this Mac sits idle before its display turns off", minutes_choices(l, "display-after", source, display, Setting::Display)));
     }
     if let Some(sleep) = timers.sleep {
-        rows = add(rows, idle_row(l, "Mac sleeps", "How long idle before the Mac sleeps", minutes_choices(l, "sleep-after", source, sleep, Setting::Sleep)));
+        rows = add(rows, idle_row(l, "Mac sleeps after", None, "How long this Mac sits idle before it sleeps", minutes_choices(l, "sleep-after", source, sleep, Setting::Sleep)));
     }
-    let flags: [(Option<bool>, &'static str, &str, &str, fn(bool) -> Setting); 3] = [
-        (timers.low_power, "low-power", "Low Power Mode", "Slows the Mac a little to save energy", Setting::LowPower),
-        (timers.wake_network, "wake-network", "Wake for network access", "Wakes for a shared file or screen", Setting::WakeNetwork),
-        (timers.power_nap, "power-nap", "Power Nap", "Checks mail and updates while asleep", Setting::PowerNap),
+    let flags: [Flag; 3] = [
+        (timers.low_power, "low-power", "Low Power Mode", "Slower, saves energy", "Slows this Mac a little to save energy", Setting::LowPower),
+        (timers.wake_network, "wake-network", "Wake for network access", "For sharing", "Lets a shared file or screen wake this Mac", Setting::WakeNetwork),
+        (timers.power_nap, "power-nap", "Power Nap", "Checks mail while asleep", "Checks mail and updates while asleep", Setting::PowerNap),
     ];
-    for (value, key, name, help, make) in flags {
+    for (value, key, name, short, help, make) in flags {
         if let Some(on) = value {
             let toggle = switch(l, key, name, on, true).on_press(move |s: &mut Ui| awake::set_timer(s, source, make(!on)));
-            rows = add(rows, idle_row(l, name, help, toggle));
+            rows = add(rows, idle_row(l, name, Some(short), help, toggle));
         }
     }
     let rows = rows.opacity(if asking { 0.6 } else { 1.0 });
-    let note = if asking { "Waiting for your password…" } else { "Changes ask for your password" };
+    let note = if asking { "Waiting for your password…" } else { "Permanent macOS settings · a change asks your password" };
     let foot = row().key("idle-note").h(SMALL_H).gap(6.0).center_y().child(icon(&icons::LOCK, 11.0).color(l.faint)).child(caption(l, note));
     let height = stack(&[TITLE_H, count as f32 * IDLE_ROW_H, SMALL_H]);
     (section("when-idle").child(title).child(rows).child(foot), height)
 }
 
-/// A row of the idle timers: its name, with what it means in its tooltip, and its control.
-fn idle_row(l: &Look, name: &str, help: &str, control: El) -> El {
-    row().w_full().h(IDLE_ROW_H).gap(12.0).center_y().help(help.to_owned()).child(text(name.to_owned()).font(font(12.0, 400.0)).color(l.text)).child(spacer()).child(control)
+/// One of macOS's on-or-off settings: its value, key, name, what it does in a few words and in
+/// a sentence, and the setting that changes it.
+type Flag = (Option<bool>, &'static str, &'static str, &'static str, &'static str, fn(bool) -> Setting);
+
+/// A row of the idle timers: its name, what it does in a few words beside it and in a
+/// sentence in its tooltip, and its control.
+fn idle_row(l: &Look, name: &str, short: Option<&str>, help: &str, control: El) -> El {
+    let mut names = row().grow(1.0).min_w(0.0).gap(8.0).center_y().child(text(name.to_owned()).font(font(12.0, 400.0)).color(l.text));
+    if let Some(short) = short {
+        names = names.child(text(short.to_owned()).font(font(11.0, 400.0)).color(l.faint).truncate().min_w(0.0));
+    }
+    row().w_full().h(IDLE_ROW_H).gap(12.0).center_y().help(help.to_owned()).child(names).child(control)
 }
 
 /// The minutes to pick from for a timer now at `current`.
@@ -423,6 +465,14 @@ fn lid_and_wake(s: &Ui, l: &Look, view: &PowerView, height: f32) -> El {
     let list = next_section(l, "lid-wake").h(height).child(section_title(l, if view.lid.is_some() { "Lid and wake" } else { "Wake" }, None));
     let room = rest(height, &[TITLE_H]);
     let shown = (room / ROW_H).floor().max(0.0) as usize;
+    // Short of a row (a banner took its room): the last wake and sleep share one, rather than
+    // the sleep going unsaid.
+    if lines.len() > shown
+        && let (Some(woke), Some(slept)) = (view.woke_at, view.slept_at)
+    {
+        lines.retain(|(key, ..)| *key == "lid");
+        lines.push(("woke", format!("Woke {}", moment(woke, s.now)), format!("slept {}", moment(slept, s.now))));
+    }
     let mut rows = col().w_full();
     for (key, value, note) in lines.into_iter().take(shown) {
         let lead = match key {
@@ -473,10 +523,10 @@ fn now(l: &Look) -> El {
     let buttons = row()
         .w_full()
         .gap(8.0)
-        .child(action("now-display-off", &icons::MONITOR_OFF, "Display off").help("Turns the display off; the Mac stays awake").on_press_tx(awake::display_off))
-        .child(action("now-sleep", &icons::MOON, "Sleep").help("Puts the Mac to sleep now").on_press_tx(awake::sleep_now))
-        .child(action("now-lock", &icons::LOCK, "Lock screen").help("Locks the screen, as ⌃⌘Q does").on_press_tx(awake::lock_screen));
-    next_section(l, "now").child(section_title(l, "Now", None)).child(buttons)
+        .child(action("now-display-off", &icons::MONITOR_OFF, "Display off").help("Turns the display off now; the Mac stays awake").on_press_tx(awake::display_off))
+        .child(action("now-sleep", &icons::MOON, "Sleep now").help("Puts this Mac to sleep now, whatever keeps it awake").on_press_tx(awake::sleep_now))
+        .child(action("now-lock", &icons::LOCK, "Lock screen").help("Locks the screen now, as ⌃⌘Q does; the Mac stays awake").on_press_tx(awake::lock_screen));
+    next_section(l, "now").child(section_title(l, "Right now", Some(caption(l, "Each acts at once")))).child(buttons)
 }
 
 #[cfg(test)]

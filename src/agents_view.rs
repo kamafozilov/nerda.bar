@@ -178,7 +178,9 @@ pub(crate) fn updated(now: i64, at: i64) -> String {
 fn body(s: &Ui, l: &Look, provider: Provider) -> El {
     let a = s.agent(provider);
     let limits = a.limits(s.now);
-    let problem = a.problem.as_ref().filter(|p| !matches!(p, Problem::SignedOut));
+    // Signed out with nothing to show is the tab for connecting; with limits from before on
+    // screen, it is why they are no longer current.
+    let problem = a.problem.as_ref().filter(|p| !matches!(p, Problem::SignedOut) || limits.is_some());
     let height = BODY_H - if problem.is_some() { BANNER_H } else { 0.0 };
     let left = match &limits {
         Some(snapshot) => limits_column(s, l, provider, snapshot, height, problem.is_some()),
@@ -202,21 +204,32 @@ pub(crate) fn problem_banner(s: &Ui, l: &Look, provider: Provider, problem: &Pro
         Problem::LoginExpired => (
             &icons::KEY_ROUND,
             match provider {
-                Provider::Codex => "Run `codex login` to renew it. Nerda Bar never changes your login.".to_owned(),
-                Provider::DeepSeek => "DeepSeek turned the key down. Add a valid key with the + button.".to_owned(),
-                Provider::Claude => problem.detail(s.now),
+                Provider::Codex => "Run `codex login` to renew it. Your login is only ever read.".to_owned(),
+                Provider::DeepSeek => "DeepSeek turned the key down. Replace it in Settings.".to_owned(),
+                Provider::Claude => "Run `claude` once to renew it. Your login is only ever read.".to_owned(),
             },
         ),
         Problem::RateLimited { until } => (&icons::CIRCLE_PAUSE, format!("{} asked for a pause. {}", provider.name(), retry(until - s.now))),
         Problem::Offline(_) => (
             &icons::WIFI_OFF,
-            match snapshot {
-                Some(snapshot) => format!("Limits are from {}; usage is read from this Mac and is current.", time::clock(snapshot.fetched_at, false)),
-                None => "Your limits show once the Mac is back online.".to_owned(),
+            match (provider, snapshot) {
+                (Provider::DeepSeek, _) => match s.deepseek.ledger.as_ref().and_then(|ledger| ledger.last.as_ref()) {
+                    Some(balance) => format!("The balance is from {}.", time::clock(balance.fetched_at, false)),
+                    None => "Your balance shows once the Mac is back online.".to_owned(),
+                },
+                (_, Some(snapshot)) => format!("Limits are from {}; usage is from this Mac and current.", time::clock(snapshot.fetched_at, false)),
+                (_, None) => "Your limits show once the Mac is back online.".to_owned(),
             },
         ),
         Problem::Failed(reason) => (&icons::TRIANGLE_ALERT, format!("{reason} {}", retry(s.config.refresh_seconds() - since))),
-        Problem::SignedOut => (&icons::LOG_IN, problem.detail(s.now)),
+        Problem::SignedOut => (
+            &icons::LOG_IN,
+            match provider {
+                Provider::Codex => "Run `codex login` in a terminal; these limits are from before.".to_owned(),
+                Provider::DeepSeek => "Add a key with the + button.".to_owned(),
+                Provider::Claude => "Run `claude` in a terminal and sign in; these limits are from before.".to_owned(),
+            },
+        ),
     };
     row()
         .key("problem")

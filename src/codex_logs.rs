@@ -1,11 +1,14 @@
 //! Token statistics from the Codex CLI's session logs: every response of the last 30 days under
-//! `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`, counted by local hour, model and project
-//! folder, in the same shape as Claude Code's (see `stats`).
+//! `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`, and under `archived_sessions`, where
+//! Codex moves a session that was archived, counted by local hour, model and project folder,
+//! in the same shape as Claude Code's (see `stats`). Codex compresses older sessions to
+//! `.jsonl.zst`; those are read too.
 //!
 //! A session's `token_count` events carry its running total, and the same total is written
 //! again whenever new rate limits arrive, so each response counts as the rise of the total
 //! since the event before. The model and the working directory are the ones the latest
-//! `turn_context` line names. Files are read from where the last scan stopped.
+//! `turn_context` line names. Files are read from where the last scan stopped, and a session
+//! is known by its file's name, so one that moves or is compressed is not counted again.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,10 +22,16 @@ use crate::prices::Prices;
 use crate::stats::{CACHE_READ, CACHE_WRITE_5M, DAYS, INPUT, OUTPUT, Scanner, StatsView};
 use crate::time;
 
+/// Bytes of a session read at a time.
+const CHUNK: u64 = 4 << 20;
+
 /// Where one session's file was read to, and what it had said by then.
 #[derive(Default)]
 struct Cursor {
+    /// Bytes of the session read, as it is before compression.
     offset: u64,
+    /// The compressed file's size when it was read: unchanged, there is nothing new in it.
+    compressed: Option<u64>,
     model: String,
     /// The session's working directory.
     cwd: String,
@@ -31,55 +40,90 @@ struct Cursor {
 }
 
 pub struct CodexLogs {
-    root: PathBuf,
-    cursors: HashMap<PathBuf, Cursor>,
+    roots: [PathBuf; 2],
+    /// By the session's file name, without `.zst`.
+    cursors: HashMap<String, Cursor>,
     counts: Scanner,
 }
 
 impl CodexLogs {
     pub fn new(home: &Path) -> CodexLogs {
-        CodexLogs { root: home.join("sessions"), cursors: HashMap::new(), counts: Scanner::new(&[]) }
+        CodexLogs { roots: [home.join("sessions"), home.join("archived_sessions")], cursors: HashMap::new(), counts: Scanner::new(&[]) }
     }
 
     /// Reads what the logs gained since the last scan. Returns whether any count changed.
     pub fn scan(&mut self, now: i64) -> bool {
         let cutoff = now - (DAYS as i64 + 1) * 86_400;
         let mut files = Vec::new();
-        collect(&self.root, cutoff, 0, &mut files);
+        for root in &self.roots {
+            collect(root, cutoff, 0, &mut files);
+        }
         // Forgets what fell out of the month.
         let mut changed = self.counts.scan(now);
         for (path, size) in files {
-            let mut cursor = self.cursors.remove(&path).unwrap_or_default();
-            if size < cursor.offset {
-                cursor = Cursor::default();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let zst = name.ends_with(".zst");
+            let session = name.trim_end_matches(".zst").to_owned();
+            let mut cursor = self.cursors.remove(&session).unwrap_or_default();
+            if zst {
+                if cursor.compressed != Some(size) {
+                    changed |= self.read(&path, &mut cursor, cutoff, true);
+                    cursor.compressed = Some(size);
+                }
+            } else {
+                // A file that shrank was rewritten: read it again from the start.
+                if size < cursor.offset {
+                    cursor = Cursor::default();
+                }
+                if size > cursor.offset {
+                    changed |= self.read(&path, &mut cursor, cutoff, false);
+                }
             }
-            if size > cursor.offset {
-                changed |= self.read(&path, &mut cursor, cutoff);
-            }
-            self.cursors.insert(path, cursor);
+            self.cursors.insert(session, cursor);
         }
         changed
     }
 
-    fn read(&mut self, path: &Path, cursor: &mut Cursor, cutoff: i64) -> bool {
+    /// Counts the complete lines of `path` past the cursor, a chunk at a time, and moves the
+    /// cursor past them. A compressed file is read from its start, and what the cursor has
+    /// already counted of the session is passed over.
+    fn read(&mut self, path: &Path, cursor: &mut Cursor, cutoff: i64, zst: bool) -> bool {
         let Ok(mut file) = File::open(path) else { return false };
-        if file.seek(SeekFrom::Start(cursor.offset)).is_err() {
-            return false;
-        }
-        let mut buffer = Vec::new();
-        if file.read_to_end(&mut buffer).is_err() {
-            return false;
-        }
-        let complete = memchr::memrchr(b'\n', &buffer).map_or(0, |at| at + 1);
-        let mut changed = false;
-        for line in buffer[..complete].split(|b| *b == b'\n') {
-            // Most lines are messages and tool output: only these two kinds are parsed.
-            let wanted = memchr::memmem::find(line, b"\"turn_context\"").is_some() || memchr::memmem::find(line, b"\"token_count\"").is_some();
-            if wanted && let Ok(value) = serde_json::from_slice::<Value>(line) {
-                changed |= self.count(&value, cursor, cutoff);
+        let mut skip = 0;
+        let mut source: Box<dyn Read> = if zst {
+            skip = cursor.offset;
+            match ruzstd::decoding::StreamingDecoder::new(file) {
+                Ok(decoder) => Box::new(decoder),
+                Err(_) => return false,
             }
+        } else {
+            if file.seek(SeekFrom::Start(cursor.offset)).is_err() {
+                return false;
+            }
+            Box::new(file)
+        };
+        let mut buffer = Vec::new();
+        let mut changed = false;
+        while let Ok(read) = (&mut source).take(CHUNK).read_to_end(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            if skip > 0 {
+                let passed = skip.min(buffer.len() as u64);
+                buffer.drain(..passed as usize);
+                skip -= passed;
+            }
+            let complete = memchr::memrchr(b'\n', &buffer).map_or(0, |at| at + 1);
+            for line in buffer[..complete].split(|b| *b == b'\n') {
+                // Most lines are messages and tool output: only these two kinds are parsed.
+                let wanted = memchr::memmem::find(line, b"\"turn_context\"").is_some() || memchr::memmem::find(line, b"\"token_count\"").is_some();
+                if wanted && let Ok(value) = serde_json::from_slice::<Value>(line) {
+                    changed |= self.count(&value, cursor, cutoff);
+                }
+            }
+            buffer.drain(..complete);
+            cursor.offset += complete as u64;
         }
-        cursor.offset += complete as u64;
         changed
     }
 
@@ -115,7 +159,10 @@ impl CodexLogs {
                 tokens[CACHE_WRITE_5M] = written;
                 tokens[OUTPUT] = output;
                 let model = if cursor.model.is_empty() { "gpt" } else { cursor.model.as_str() };
-                self.counts.record(at, model, &cursor.cwd, tokens);
+                // The request's size, for its price tier: what the event says the last response
+                // took, else the rise of the total.
+                let prompt = payload.and_then(|p| p.pointer("/info/last_token_usage/input_tokens")).and_then(Value::as_u64).unwrap_or(input as u64);
+                self.counts.record(at, model, &cursor.cwd, prompt, tokens);
                 true
             }
             _ => false,
@@ -127,8 +174,8 @@ impl CodexLogs {
     }
 }
 
-/// The session files under `dir` changed since `cutoff`, with their sizes: four levels down,
-/// year, month and day.
+/// The session files under `dir` changed since `cutoff`, plain or compressed, with their
+/// sizes: up to four levels down, year, month and day.
 fn collect(dir: &Path, cutoff: i64, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -136,7 +183,7 @@ fn collect(dir: &Path, cutoff: i64, depth: usize, out: &mut Vec<(PathBuf, u64)>)
         let path = entry.path();
         if kind.is_dir() && depth < 4 {
             collect(&path, cutoff, depth + 1, out);
-        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+        } else if kind.is_file() && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")) {
             let Ok(meta) = entry.metadata() else { continue };
             let modified = meta.modified().ok().and_then(|at| at.duration_since(UNIX_EPOCH).ok()).map_or(i64::MAX, |d| d.as_secs() as i64);
             if modified >= cutoff {
@@ -190,6 +237,25 @@ mod tests {
         assert_eq!((today.projects[0].name.as_str(), today.projects[0].path.as_str()), ("nerda.bar", "/work"));
         assert_eq!(today.projects[0].tokens, today.total());
         assert!(!logs.scan(now), "nothing new on a second scan");
+        // Archived, the session moves: the same file under another folder is the same session.
+        std::fs::create_dir_all(dir.join("archived_sessions")).unwrap();
+        std::fs::rename(day.join("rollout-a.jsonl"), dir.join("archived_sessions/rollout-a.jsonl")).unwrap();
+        assert!(!logs.scan(now), "a session that moved is not counted again");
+        // And a session that was already archived when the app started counts.
+        let mut fresh = CodexLogs::new(&dir);
+        assert!(fresh.scan(now));
+        assert_eq!(fresh.view(&Prices::default(), now).ranges[1].tokens[OUTPUT], 80);
+        // Compressed, as Codex leaves older sessions: nothing new for the app that counted it,
+        // and the whole session for one that starts later.
+        let plain = std::fs::read(dir.join("archived_sessions/rollout-a.jsonl")).unwrap();
+        let packed = ruzstd::encoding::compress_to_vec(plain.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        std::fs::write(dir.join("archived_sessions/rollout-a.jsonl.zst"), packed).unwrap();
+        std::fs::remove_file(dir.join("archived_sessions/rollout-a.jsonl")).unwrap();
+        assert!(!logs.scan(now), "a session that was compressed is not counted again");
+        let mut later = CodexLogs::new(&dir);
+        assert!(later.scan(now));
+        assert_eq!(later.view(&Prices::default(), now).ranges[1].tokens[OUTPUT], 80);
+        assert!(!later.scan(now));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

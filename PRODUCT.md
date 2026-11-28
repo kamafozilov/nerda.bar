@@ -25,7 +25,8 @@ Limits are the exact numbers each provider reports; tokens are counted from Clau
 - Opened from a menu bar item, read for a few seconds, closed by a click elsewhere or Esc.
 - Providers: Claude, Codex, DeepSeek. Only providers the user has signed in to are shown; more can be added.
 - Mac measures: CPU, Memory, Disk, Network, Battery, GPU; each can be a menu bar item and a tab.
-- Sleep: keep the Mac awake for a while or until turned off (a cup in the menu bar while it runs), the idle timers, the lid, and what keeps it awake. Changes macOS reserves for an administrator ask with its own password dialog.
+- Every agent can be shown or hidden in the menu bar and in the panel, and has its own options; one that shows nowhere is not read.
+- Sleep: one sentence for what the Mac does now, then keep the Mac awake for a while or until turned off (a cup in the menu bar while it runs), the idle timers, the lid, and what keeps it awake. Each control says what it does and whether it is temporary or permanent. Changes macOS reserves for an administrator ask with its own password dialog.
 - Claude Code logs live under `<config>/projects/<project>/…jsonl`, so usage can be grouped by project.
 
 ## Capabilities and Constraints

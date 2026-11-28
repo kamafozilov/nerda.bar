@@ -94,7 +94,7 @@ fn cycle(handle: rune::AppHandle<Ui>) {
                 handle.update(ui::close);
                 std::thread::sleep(std::time::Duration::from_millis(700));
             }
-            handle.update(move |s, tx| ui::toggle(s, anchor, Tab::Claude, tx));
+            handle.update(move |s, tx| ui::toggle(s, anchor, "claude", tx));
             std::thread::sleep(std::time::Duration::from_millis(1300));
         }
     });
@@ -121,6 +121,49 @@ fn main() {
         scenes: &[
             ("used", |s| s.config.show_used = true),
             ("settings", |s| s.page = ui::Page::Settings),
+            ("settings-codex", |s| {
+                s.page = ui::Page::Settings;
+                s.settings_agent = model::Provider::Codex;
+            }),
+            ("settings-deepseek", |s| {
+                s.page = ui::Page::Settings;
+                s.settings_agent = model::Provider::DeepSeek;
+            }),
+            ("settings-remove-key", |s| {
+                s.page = ui::Page::Settings;
+                s.settings_agent = model::Provider::DeepSeek;
+                s.confirm_remove_key = true;
+            }),
+            ("settings-agents-off", |s| {
+                s.page = ui::Page::Settings;
+                s.config.codex_in_menu_bar = false;
+                s.config.codex_tab = false;
+                s.config.deepseek_tab = false;
+                s.deepseek.ledger = None;
+                s.deepseek.problem = Some(Problem::SignedOut);
+                s.settings_agent = model::Provider::DeepSeek;
+            }),
+            ("replace-key", |s| {
+                s.tab = Tab::DeepSeek;
+                s.adding = true;
+                s.replacing_key = true;
+            }),
+            ("signed-out-stale", |s| s.claude.problem = Some(Problem::SignedOut)),
+            ("no-tabs", |s| {
+                for provider in model::Provider::ALL {
+                    s.config.set_tab(provider, false);
+                }
+                for tab in Tab::SYSTEM {
+                    ui::hide_tab_for_scene(s, tab);
+                }
+                s.config.sleep.tab = false;
+            }),
+            ("mac-only", |s| {
+                for provider in model::Provider::ALL {
+                    s.config.set_tab(provider, false);
+                }
+                s.tab = Tab::Cpu;
+            }),
             ("cpu", |s| s.tab = Tab::Cpu),
             ("cpu-day", |s| {
                 s.tab = Tab::Cpu;
@@ -209,7 +252,7 @@ fn main() {
                     memory.pressure = system::Pressure::Warning;
                 }
             }),
-            ("no-tabs", |s| {
+            ("fewer-tabs", |s| {
                 s.config.cpu.tab = false;
                 s.config.memory.tab = false;
             }),
@@ -282,7 +325,7 @@ fn main() {
     let me = app.handle();
     let worker = (!headless).then(|| {
         let ui = me.clone();
-        worker::spawn(data_dir.clone(), config.refresh_seconds(), move |event| ui.update(move |s, tx| ui::apply(s, event, tx)))
+        worker::spawn(data_dir.clone(), config.refresh_seconds(), model::Provider::ALL.map(|provider| config.shows(provider)), move |event| ui.update(move |s, tx| ui::apply(s, event, tx)))
     });
 
     let sampler = (!headless).then(|| {
@@ -302,12 +345,11 @@ fn main() {
                 return;
             }
             installed = true;
-            status_item::set_show_used(config.show_used);
             // Claude's item first, then this Mac's; Codex and DeepSeek add theirs once signed in.
-            status_item::install(ready_handle.clone(), data_dir.clone(), "claude", "Claude", &status_item::CLAUDE_MARK);
             ready_handle.update(|s, _| {
                 s.sync_menu_bar();
                 s.sync_system_items();
+                awake::sync_item(s);
             });
             cycle(ready_handle.clone());
             if show_at_launch {
@@ -316,7 +358,7 @@ fn main() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(600));
                     handle.update(|s, tx| {
-                        if let Some(anchor) = test_anchor().or_else(|| status_item::anchor_of("claude")) {
+                        if let Some(anchor) = test_anchor().or_else(|| status_item::first_anchor().map(|(_, anchor)| anchor)) {
                             ui::open(s, anchor, Tab::Claude, tx);
                         }
                     });

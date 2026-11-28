@@ -183,7 +183,7 @@ An instrument panel under the menu bar: one fixed 760×640 panel, read in a few 
 Structure, top to bottom:
 
 1. **Top bar (48pt):** icon-only tabs. Agents, a hairline, CPU, Memory, Disk, Network, Battery, GPU, a hairline, Sleep; Settings at the trailing end. A Mac without a battery has no Battery tab.
-2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. The plan's line adds when it renews ("Ultra plan · Renews 22 Nov, 21:47"), ends (in the warning colour) or is paid until, with the full date and time on hover. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Sleep: the power source and its idle timers, with "Kept awake · 42m left" (green), "Sleep is off" (amber) or how many apps keep it awake at the end. In Settings: the version and Quit.
+2. **Context bar (48pt):** what this tab is about. In Agents: one tab per signed-in provider, then `+`, then the plan, its last update and Refresh. The plan's line adds when it renews ("Ultra plan · Renews 22 Nov, 21:47"), ends (in the warning colour) or is paid until, with the full date and time on hover. In a Mac tab: its name, a badge (chip, capacity) and a quiet subtitle, with one status at the trailing end. In Sleep: what this Mac does now in one sentence, everything counted in ("Now: stays awake until 15:33; closing the lid still sleeps it"), with "Kept awake · 42m left" (green), "Sleep is off" (amber) or how many apps keep it awake at the end. In Settings: the version and Quit.
 3. **Body:** two columns of 380pt, divided by a hairline, each a stack of sections.
 
 ## Colors
@@ -210,7 +210,7 @@ SF Pro, the system font, in the app (Inter stands in for it in Paper). Seven rol
   1. a chart (limit chart, History, Activity, Charge) takes all remaining height;
   2. otherwise a list shows as many fixed-height rows as fit (`floor(available / row height)`), then one "N more …, X together" line pinned to the list's bottom.
   Rows never stretch and gaps never grow to fill space.
-- **Row heights by role:** list row 32 for every one-line list (models, projects, apps with a 20pt icon), detail row 52 (two lines: a title and an explanation), settings row 48, limit row 52.
+- **Row heights by role:** list row 32 for every one-line list (models, projects, apps with a 20pt icon), detail row 52 (two lines: a title and an explanation), settings row 44, limit row 52.
 - **Lanes:** leading slots are fixed width (12 for a swatch, rank or status dot; 20 for an app icon); trailing values are right-aligned in fixed columns (tokens 56, cost or value 64).
 - **Truncation:** names truncate at the end with a tooltip; the secondary text beside a name (folder, process count, sign-in status) gives way first. Model IDs truncate in the middle, because they differ at the end. Numbers, amounts and times never truncate.
 
@@ -241,7 +241,11 @@ States every tab must cover:
 - **No agents:** a centred card listing each provider with how to sign in and a Check again or Add key button.
 - **Absent hardware:** no Battery tab; its Settings row says "This Mac has no battery". On Sleep, a Mac without a battery shows the power adapter's timers alone, and one without a lid has no lid switch or lid row.
 
-The Sleep tab: on the left, Keep awake (a 72pt ring of the time left beside the headline, then the durations as one segmented control across the column), While kept awake (a card of 52pt switch rows: display, lid) and Keeping it awake (an app list that fills the rest); on the right, When idle (the source's segments in the title, 36pt rows of timer choices and switches, a lock caption: changes ask for a password), Lid and wake (32pt rows, as many as fit) and Now (three equal buttons). Sleep left off by an earlier run, or a change that failed, is the banner.
+The Sleep tab: on the left, what is temporary and needs no password: Keep awake (a 72pt ring of the time left beside the headline, then the durations as one segmented control across the column), Keep-awake options (a card of 52pt switch rows: display, lid) and Also keeping it awake (an app list that fills the rest); on the right, what is permanent: When idle (the source's segments in the title, 36pt rows of timer choices and switches, a lock caption: permanent macOS settings, a change asks for a password), Lid and wake (32pt rows, as many as fit) and Right now (three equal buttons). Sleep that is off with no keep-awake asking for it, or a change that failed, is the banner.
+
+Every control on it says what it does where it is, not only in a tooltip: a section title's caption says its scope ("Temporary · no password", "Apply to this keep-awake now", "Each acts at once"), a switch's second line says what it does as it now stands, and a quiet few words follow the name of each macOS setting. Copy there must fit its line: a sentence that would be cut is rewritten shorter.
+
+Settings: on the left, Agents (a table like This Mac's: a row per agent with where its login stands, a Menu bar switch and a Tab switch, then Refresh every) and the options of one agent, picked by a segmented control at the group's caption; on the right, This Mac and General. An agent that shows nowhere reads "Off" and is not asked for anything. Removing DeepSeek's key asks first, in the row itself.
 
 Keyboard: ⌘1 Agents, ⌘2–⌘8 the Mac tabs and Sleep in order, ⌘⇧[ and ⌘⇧] the previous and next provider, ⌘R refresh, ⌘, Settings, ⌘Q quit, Esc closes.
 

@@ -229,9 +229,11 @@ impl Sampler {
         let _ = self.rates.send(rate);
     }
 
-    /// Which of the disk, network, battery and GPU to read, as `WANT_*` bits.
-    pub fn set_wanted(&self, wanted: u8) {
-        self.wanted.store(wanted, Ordering::Relaxed);
+    /// Which of the disk, network, battery and GPU to read, as `WANT_*` bits, and which of
+    /// those a menu bar item shows: those are read at the sampler's rate, the others less
+    /// often while the panel isn't showing this Mac.
+    pub fn set_wanted(&self, wanted: u8, often: u8) {
+        self.wanted.store((wanted & 0x0f) | (often & wanted & 0x0f) << 4, Ordering::Relaxed);
     }
 }
 
@@ -296,16 +298,18 @@ pub fn spawn(data_dir: Option<std::path::PathBuf>, on_view: impl Fn(Arc<SystemVi
             };
             let memory = Memory::read(&host, machine.memory);
             // Off the panel, the apps are read only for the disk tab's hour of disk use.
-            let disk_wanted = wants.load(Ordering::Relaxed) & WANT_DISK != 0;
+            let bits = wants.load(Ordering::Relaxed);
+            let (wanted_now, often) = (bits & 0x0f, if rate == Rate::Live { bits & 0x0f } else { bits >> 4 });
+            let disk_wanted = wanted_now & WANT_DISK != 0;
             if rate == Rate::Live || (disk_wanted && now - apps_at >= APPS_EVERY) {
                 // CPU time needs an earlier reading to measure against; only the panel shows it.
                 if rate == Rate::Live && !apps.primed() {
                     // This reading's disk bytes cover the time since the last one: keep them.
-                    let first = apps.read(cores);
+                    let first = objc2::rc::autoreleasepool(|_| apps.read(cores));
                     more.app_disk(now, &first);
                     std::thread::sleep(Duration::from_millis(300));
                 }
-                let read = apps.read(cores);
+                let read = objc2::rc::autoreleasepool(|_| apps.read(cores));
                 apps_at = now;
                 app_usage = Some(Arc::new(more.app_disk(now, &read)));
             }
@@ -323,7 +327,7 @@ pub fn spawn(data_dir: Option<std::path::PathBuf>, on_view: impl Fn(Arc<SystemVi
             if let Some(ticks) = ticks {
                 last = Some((now, ticks));
             }
-            let readings = more.read(from, now, wants.load(Ordering::Relaxed));
+            let readings = more.read(from, now, wanted_now, often);
             let tiers = |series: &Series| more::tiers(series, now);
             on_view(Arc::new(SystemView {
                 at: now,

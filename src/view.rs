@@ -28,6 +28,8 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
 
     let screen = match (s.page, s.tab) {
         (Page::Settings, _) => settings_view::screen(s, &l),
+        // The settings hide every tab: say so, with the way back.
+        _ if !s.agents_enabled() && s.bar_tabs().is_empty() => crate::add_view::no_tabs(&l),
         (_, tab) if tab.provider().is_some() => agents_view::screen(s, &l),
         (_, Tab::Sleep) => sleep_view::screen(s, &l),
         (_, tab) => system_view::screen(s, &l, tab),
@@ -77,10 +79,14 @@ fn top_bar(s: &Ui, l: &Look) -> El {
         .center_y()
         .fill(l.bar)
         .corners([RADIUS, RADIUS, 0.0, 0.0])
-        .border_sides([0.0, 0.0, 1.0, 0.0], l.stroke)
-        .child(nav_tile(l, "tab-agents", &icons::SPARKLES, "Agents", Some("⌘1"), agents_on).on_press_tx(ui::show_agents));
+        .border_sides([0.0, 0.0, 1.0, 0.0], l.stroke);
+    // Agents has its tile while the settings show at least one agent's tab.
+    let agents = s.agents_enabled();
+    if agents {
+        bar = bar.child(nav_tile(l, "tab-agents", &icons::SPARKLES, "Agents", Some("⌘1"), agents_on).on_press_tx(ui::show_agents));
+    }
     let macs = s.mac_tabs();
-    if !macs.is_empty() {
+    if agents && !macs.is_empty() {
         bar = bar.child(el().key("bar-separator").size(1.0, 16.0).mx(4.0).fill(l.track));
     }
     for tab in macs {
@@ -90,8 +96,10 @@ fn top_bar(s: &Ui, l: &Look) -> El {
     // Sleep is a control, not a measure: a hairline of its own sets it apart.
     if s.config.sleep.tab {
         let shortcut = s.shortcut(Tab::Sleep);
+        if agents || !s.mac_tabs().is_empty() {
+            bar = bar.child(el().key("sleep-separator").size(1.0, 16.0).mx(4.0).fill(l.track));
+        }
         bar = bar
-            .child(el().key("sleep-separator").size(1.0, 16.0).mx(4.0).fill(l.track))
             .child(nav_tile(l, "tab-sleep", &icons::MOON, "Sleep", shortcut.as_deref(), on_tab && s.tab == Tab::Sleep).on_press_tx(|s: &mut Ui, tx| ui::set_tab(s, Tab::Sleep, tx)));
     }
     bar.child(spacer()).child(nav_tile(l, "tab-settings", &icons::SETTINGS_2, "Settings", Some("⌘,"), s.page == Page::Settings).on_press_tx(ui::toggle_settings))

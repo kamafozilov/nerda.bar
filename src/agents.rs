@@ -143,10 +143,11 @@ impl Ui {
         }
     }
 
-    /// What the menu bar shows of `provider`'s plan, and whether it counts what is used.
+    /// What the menu bar shows of `provider`'s plan, whether it counts what is used, and
+    /// whether each model's own limit shows beside it.
     pub fn menu_bar(&self, provider: Provider) -> (MenuBarMetric, bool, bool) {
         match provider {
-            Provider::Codex => (self.config.codex.menu_bar, self.config.codex.show_used, false),
+            Provider::Codex => (self.config.codex.menu_bar, self.config.codex.show_used, self.config.codex.models),
             _ => (self.config.menu_bar, self.config.show_used, self.config.menu_bar_models),
         }
     }
@@ -156,22 +157,24 @@ impl Ui {
     }
 
     /// Puts each provider's numbers on its menu bar item, adding the item once there is
-    /// something to show and taking it away when there is nothing.
+    /// something to show and taking it away when there is nothing, or when the settings
+    /// switch it off.
     pub fn sync_menu_bar(&self) {
         if self.demo {
             return;
         }
         for provider in [Provider::Claude, Provider::Codex] {
             let agent = self.agent(provider);
-            // Codex gets an item only once it is signed in; Claude always has one.
-            if provider == Provider::Codex && agent.snapshot.is_none() {
+            let (metric, show_used, models) = self.menu_bar(provider);
+            status_item::set_show_used(provider, show_used);
+            // Codex gets an item only once it is signed in; Claude's is there from the start,
+            // saying so when it is not.
+            if !self.config.in_menu_bar(provider) || (provider == Provider::Codex && agent.snapshot.is_none()) {
                 status_item::remove(provider.id());
                 continue;
             }
-            if provider == Provider::Codex {
-                status_item::install(self.me.clone(), self.data_dir.clone(), provider.id(), provider.name(), &status_item::OPENAI_MARK);
-            }
-            let (metric, show_used, models) = self.menu_bar(provider);
+            let mark = if provider == Provider::Codex { &status_item::OPENAI_MARK } else { &status_item::CLAUDE_MARK };
+            status_item::install(&self.me, &self.data_dir, provider.id(), provider.name(), mark);
             let limits = agent.limits(self.now);
             let shown = limits.as_ref().map(|snapshot| model::menu_bar_limits(snapshot, metric.effective(Some(snapshot)), models)).unwrap_or_default();
             // One limit reads alone; with several, each takes its name.
@@ -192,15 +195,21 @@ impl Ui {
             status_item::set(provider.id(), None, &parts, agent.problem.is_some(), &tooltip.join("\n"));
         }
         // DeepSeek: its balance, once a key is there, while the settings show it.
-        match self.deepseek.ledger.as_ref().and_then(|ledger| ledger.last.as_ref()).filter(|_| self.config.deepseek_menu_bar) {
+        match self.deepseek.ledger.as_ref().and_then(|ledger| ledger.last.as_ref()).filter(|_| self.config.deepseek_in_menu_bar) {
             Some(balance) => {
-                status_item::install(self.me.clone(), self.data_dir.clone(), Provider::DeepSeek.id(), Provider::DeepSeek.name(), &status_item::DEEPSEEK_MARK);
-                let severity = if !balance.available { Severity::Critical } else { Severity::Normal };
+                status_item::install(&self.me, &self.data_dir, Provider::DeepSeek.id(), Provider::DeepSeek.name(), &status_item::DEEPSEEK_MARK);
+                let severity = deepseek::severity(balance, self.config.deepseek_warn_below);
                 let text = deepseek::money(balance.total, &balance.currency);
-                status_item::set(Provider::DeepSeek.id(), None, &[status_item::Part { tag: None, text: text.clone(), severity }], self.deepseek.problem.is_some(), &format!("DeepSeek balance: {text}"));
+                let note = match severity {
+                    Severity::Critical => ", too low for API calls",
+                    Severity::Warning => ", running low",
+                    Severity::Normal => "",
+                };
+                status_item::set(Provider::DeepSeek.id(), None, &[status_item::Part { tag: None, text: text.clone(), severity }], self.deepseek.problem.is_some(), &format!("DeepSeek balance: {text}{note}"));
             }
             None => status_item::remove(Provider::DeepSeek.id()),
         }
+        self.sync_app_item();
     }
 
     pub(crate) fn send(&self, command: Command) {
