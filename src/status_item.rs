@@ -175,7 +175,9 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            self.ivars().app.update(ui::quit);
+            // A keep-awake ends with a quit for good: only one cut short comes back.
+            crate::awake::forget(&self.ivars().data_dir);
+            self.ivars().app.quit();
         }
     }
 

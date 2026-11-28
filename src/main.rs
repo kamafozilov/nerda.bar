@@ -212,6 +212,17 @@ fn main() {
                     std::sync::Arc::make_mut(view).sleep_disabled = true;
                 }
             }),
+            ("sleep-resumed", |s| {
+                s.tab = Tab::Sleep;
+                awake::start(s, 0);
+                // Taken up after an update: the settings want the lid, this session doesn't hold it.
+                s.config.sleep.lid = true;
+                if let Some(view) = &mut s.awake.view
+                    && let Some(lid) = &mut std::sync::Arc::make_mut(view).lid
+                {
+                    lid.causes_sleep = false;
+                }
+            }),
             ("sleep-hours", |s| {
                 s.tab = Tab::Sleep;
                 awake::start(s, 300);
@@ -351,6 +362,7 @@ fn main() {
                 s.sync_system_items();
                 // A keep-awake that an update or a crash cut short picks up where it was.
                 awake::resume(s);
+                awake::confirm_left_off(s);
                 awake::sync_item(s);
             });
             cycle(ready_handle.clone());

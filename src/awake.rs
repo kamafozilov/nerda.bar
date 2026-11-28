@@ -96,7 +96,10 @@ impl Awake {
         let flag = data_dir.join("lid-awake");
         if flag.exists() {
             if power::read_state().sleep_disabled {
+                // Perhaps: the watcher of a run that ended a moment ago (an update, a crash)
+                // may be about to turn sleep back on. `confirm_left_off` looks again.
                 awake.left_off = true;
+                awake.lid_released = Some(time::unix_now());
             } else {
                 let _ = std::fs::remove_file(flag);
             }
@@ -159,6 +162,29 @@ fn remember(s: &Ui) {
 /// Forgets the session kept on disk: the app is being quit, which ends a keep-awake for good.
 pub fn forget(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(data_dir.join(KEPT_FILE));
+}
+
+/// At launch, when an earlier run's lid flag is still there with sleep off: looks again once
+/// that run's watcher has had its time to turn sleep back on, and only then says in the menu
+/// bar that sleep was left off.
+pub fn confirm_left_off(s: &Ui) {
+    if s.demo || !s.awake.left_off {
+        return;
+    }
+    let me = s.me.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(SETTLE_SECONDS as u64 + 1));
+        let disabled = power::read_state().sleep_disabled;
+        me.update(move |s, tx| {
+            tx.instant();
+            s.now = time::unix_now();
+            if !disabled && s.awake.left_off {
+                s.awake.left_off = false;
+                let _ = std::fs::remove_file(lid_flag(s));
+            }
+            sync_item(s);
+        });
+    });
 }
 
 /// At launch: takes up the keep-awake that ran when this app last stopped without being quit

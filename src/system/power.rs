@@ -371,11 +371,6 @@ pub fn set(source: Source, setting: Setting, now: &Timers) -> Result<(), String>
 /// root, that turns it back on as soon as `flag` is gone or this app (`pid`) has quit or
 /// crashed. Removing `flag` needs no password.
 pub fn hold_lid(flag: &Path, pid: u32) -> Result<(), String> {
-    // Sleep was already off before this, by the person's own `pmset`: there is nothing to
-    // turn off, and nothing of ours to turn back on afterwards.
-    if read_state().sleep_disabled && !flag.exists() {
-        return Ok(());
-    }
     let flag = flag.to_str().filter(|path| !path.contains(['\'', '"', '\\', '$', '`'])).ok_or("The data folder's name can't be used in a command.")?;
     std::fs::write(flag, format!("{pid}\n")).map_err(|e| e.to_string())?;
     let result = as_admin(&lid_watcher(flag, pid, "/usr/bin/pmset -a disablesleep"), "Nerda Bar wants to keep this Mac awake with its lid closed.");

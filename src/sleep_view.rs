@@ -61,10 +61,13 @@ fn verdict(s: &Ui, view: &PowerView) -> String {
             Some(until) => format!("until {}", time::clock(until, false)),
             None => "until you turn Keep awake off".to_owned(),
         };
+        // What closing the lid does is what macOS says it does: with a display plugged in, it
+        // doesn't sleep the Mac whatever this app holds.
         let lid = match (view.lid, session.lid == LidHold::On && view.sleep_disabled) {
             (None, _) => "",
             (Some(_), true) => ", lid closed too",
-            (Some(_), false) => "; closing the lid still sleeps it",
+            (Some(lid), false) if lid.causes_sleep => "; closing the lid still sleeps it",
+            (Some(_), false) => "",
         };
         return format!("Now: stays awake {until}{lid}");
     }
@@ -245,7 +248,11 @@ fn while_awake(s: &Ui, l: &Look, view: &PowerView) -> El {
             // What macOS reads, not what was asked: the watcher may still be starting.
             Some(LidHold::On) if view.sleep_disabled => "Lid closed, it stays awake until this ends",
             Some(LidHold::On) => "Turning sleep off…",
+            // On in the settings, but this keep-awake doesn't hold the lid: it was taken up
+            // after an update, or the password wasn't given.
+            Some(LidHold::Off) if lid => "Not held now · switch off and on to ask again",
             _ if lid => "Asks your password when a keep-awake starts",
+            _ if view.lid.is_some_and(|lid| !lid.causes_sleep) => "Off · the lid doesn't sleep it now, with a display on",
             _ => "Off: closing the lid sleeps the Mac",
         };
         let lid_switch = switch(l, "keep-lid", "Stay awake with the lid closed", lid, true).on_press(move |s: &mut Ui| awake::set_lid(s, !lid));
