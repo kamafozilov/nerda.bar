@@ -292,11 +292,27 @@ fn limit_row(s: &Ui, l: &Look, provider: Provider, limit: &Limit, any_scoped: bo
     if let Some(scope) = scope {
         title = title.child(text(scope).font(font(13.0, 400.0)).color(l.dim).truncate().min_w(0.0));
     }
-    let (second, second_color) = match runway(l, limit, now) {
-        Some((warning, color)) => (format!("{} · {warning}", reset_note(limit, now)), color),
-        None => (reset_note(limit, now), l.faint),
-    };
-    let words = col().grow(1.0).min_w(0.0).gap(2.0).child(title).child(text(second).font(digits(11.0, 400.0)).color(second_color).truncate().min_w(0.0));
+    // The time to the reset stands out from the words around it: it is what the row is read
+    // for after the percentage. Then when that is, or the warning that the limit won't last.
+    let quiet = |words: String| text(words).font(digits(11.0, 400.0)).color(l.faint);
+    let mut second = row().key(format!("reset-{}", limit.id)).gap(4.0).center_y().min_w(0.0);
+    match limit.resets_in(now) {
+        Some(left) => {
+            second = second.child(quiet("Resets in".to_owned())).child(text(time::span(left)).key("reset-in").font(digits(12.0, 600.0)).color(l.text));
+            if let Some(at) = limit.resets_at {
+                let when = if left < 86_400 { format!("at {}", time::clock(at, false)) } else { format!("on {}", time::weekday_clock(at)) };
+                second = second.help(format!("Resets {when}, {}", time::date(at)));
+                if runway(l, limit, now).is_none() {
+                    second = second.child(quiet(format!("· {}", when.split_once(' ').map_or(when.as_str(), |(_, rest)| rest))).truncate().min_w(0.0));
+                }
+            }
+        }
+        None => second = second.child(quiet(reset_note(limit, now))),
+    }
+    if let Some((warning, color)) = runway(l, limit, now) {
+        second = second.child(text(format!("· {warning}")).font(digits(11.0, 600.0)).color(color).truncate().min_w(0.0));
+    }
+    let words = col().grow(1.0).min_w(0.0).gap(2.0).child(title).child(second);
     let share = if show_used { limit.used / 100.0 } else { limit.left() / 100.0 };
     // The tick marks an even pace: where the ring would end if use had kept step with time.
     let elapsed = limit.elapsed(now).filter(|_| !limit.used_up());

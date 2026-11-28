@@ -69,7 +69,7 @@ The panel has one size on every tab. Its top bar holds the tabs as icons: **Agen
   </tr>
 </table>
 
-- **Limits**: a ring per limit (session or 5-hour, weekly, per-model weekly) filled to what is left, with a tick where an even pace would be, the time to its reset, and extra usage with its cap. Hover a ring for how far ahead or behind an even pace you are; click it to chart it.
+- **Limits**: a ring per limit (session or 5-hour, weekly, per-model weekly) filled to what is left, with a tick where an even pace would be, the time to its reset set apart in bold with the day and time it falls on, and extra usage with its cap. Hover a ring for how far ahead or behind an even pace you are; click it to chart it.
 - **The chart**: the picked limit's window from 100% down to now, an even pace to compare against, where the pace so far leads, and a pill saying whether it lasts until the reset. Under the pointer, what was left then and what was used that day.
 - **Usage** for today by the hour, and for 7 and 30 days by the day: tokens, what they would have cost at API prices, a chart split by model, and a row per model. The bar under the pointer replaces the totals; hovering the totals splits them into input, output and cache.
 - **Projects**: the folders that spent the most in the same period, with their tokens and cost. Claude's are the folder each session started in, Codex's the folder it ran in.
