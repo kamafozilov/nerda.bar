@@ -129,21 +129,83 @@ impl Awake {
     }
 }
 
+/// A keep-awake as it is kept on disk while it runs, so that one cut short by an update or a
+/// crash of this app picks up where it was when the app is back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    started: i64,
+    until: Option<i64>,
+    minutes: u32,
+}
+
+const KEPT_FILE: &str = "awake.json";
+
+/// Writes the running session to disk, or takes the file away when none runs.
+fn remember(s: &Ui) {
+    if s.demo {
+        return;
+    }
+    match &s.awake.session {
+        Some(session) => {
+            let kept = Kept { started: session.started, until: session.until, minutes: session.minutes };
+            if let Ok(text) = serde_json::to_string(&kept) {
+                let _ = crate::config::write_file(&s.data_dir, KEPT_FILE, &text);
+            }
+        }
+        None => forget(&s.data_dir),
+    }
+}
+
+/// Forgets the session kept on disk: the app is being quit, which ends a keep-awake for good.
+pub fn forget(data_dir: &std::path::Path) {
+    let _ = std::fs::remove_file(data_dir.join(KEPT_FILE));
+}
+
+/// At launch: takes up the keep-awake that ran when this app last stopped without being quit
+/// (an update replaced it, or it crashed), with the end it had. Not one from before the Mac
+/// last started, nor one whose time has passed. The lid is not held again: that would ask for
+/// a password nobody is waiting to give.
+pub fn resume(s: &mut Ui) {
+    if s.demo || s.awake.session.is_some() {
+        return;
+    }
+    let kept = std::fs::read_to_string(s.data_dir.join(KEPT_FILE)).ok().and_then(|text| serde_json::from_str::<Kept>(&text).ok());
+    match kept.filter(|kept| kept.resumable(power::booted_at(), time::unix_now())) {
+        Some(kept) => begin(s, kept.minutes, Some((kept.started, kept.until))),
+        None => forget(&s.data_dir),
+    }
+}
+
+impl Kept {
+    /// Whether the session is still one to take up at `now`, on a Mac that started at `boot`.
+    fn resumable(&self, boot: Option<i64>, now: i64) -> bool {
+        boot.is_some_and(|boot| self.started >= boot) && self.started <= now && self.until.is_none_or(|until| until > now)
+    }
+}
+
 /// Keeps the Mac awake for `minutes` from now, or until turned off with 0. A session already
 /// running starts over with the new length.
 pub fn start(s: &mut Ui, minutes: u32) {
+    begin(s, minutes, None);
+}
+
+/// Starts a session: a new one of `minutes`, or `resumed`, one that ran before with the start
+/// and the end it had.
+fn begin(s: &mut Ui, minutes: u32, resumed: Option<(i64, Option<i64>)>) {
     let now = time::unix_now();
-    let until = (minutes > 0).then(|| now + minutes as i64 * 60);
+    let (started, until) = resumed.unwrap_or((now, (minutes > 0).then(|| now + minutes as i64 * 60)));
     let lid_was = s.awake.session.as_ref().map(|session| session.lid);
     // The old assertion goes before the new one is made, so the two never overlap in the list.
     s.awake.session = None;
     let generation = s.awake.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let hold = if s.demo { None } else { power::hold(s.config.sleep.display, until.map(|until| until - now)) };
-    s.awake.session = Some(Session { started: now, until, minutes, hold, lid: LidHold::Off });
+    let hold = if s.demo { None } else { power::hold(s.config.sleep.display, until.map(|until| (until - now).max(1))) };
+    s.awake.session = Some(Session { started, until, minutes, hold, lid: LidHold::Off });
     s.awake.error = None;
     // The countdown reads the panel's clock: it starts from this moment, not the last tick.
     s.now = now;
-    if s.config.sleep.lid && has_lid(s) {
+    if resumed.is_some() {
+        // Its lid hold, if it had one, ended with the app that made it.
+    } else if s.config.sleep.lid && has_lid(s) {
         match lid_was {
             // The watcher of the session before keeps running: it ends with the flag or the
             // app, not with a time, so it carries over without another password.
@@ -156,6 +218,7 @@ pub fn start(s: &mut Ui, minutes: u32) {
     if let Some(until) = until {
         tick_until(s, generation, until);
     }
+    remember(s);
     read_soon(s);
     sync_item(s);
 }
@@ -173,6 +236,7 @@ fn end(s: &mut Ui) {
     {
         release_lid(s);
     }
+    remember(s);
     read_soon(s);
     sync_item(s);
 }
@@ -533,4 +597,26 @@ pub fn sync_item(s: &Ui) {
 
 fn save(s: &mut Ui) {
     ui::save_config(s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keep_awake_cut_short_is_taken_up_only_while_it_still_stands() {
+        let (boot, now) = (1_000, 5_000);
+        let kept = |started: i64, until: Option<i64>| Kept { started, until, minutes: 0 };
+        assert!(kept(2_000, None).resumable(Some(boot), now), "one with no end, from this boot");
+        assert!(kept(2_000, Some(6_000)).resumable(Some(boot), now), "one whose end is still ahead");
+        assert!(!kept(2_000, Some(4_000)).resumable(Some(boot), now), "not one whose time has passed");
+        assert!(!kept(500, None).resumable(Some(boot), now), "not one from before the Mac last started");
+        assert!(!kept(2_000, None).resumable(None, now), "not when the start of this boot is unknown");
+        assert!(!kept(9_000, None).resumable(Some(boot), now), "not one from a clock ahead of this one");
+    }
+
+    #[test]
+    fn the_last_minute_reads_as_one_until_it_ends() {
+        assert_eq!((left_words(59), left_words(61), left_words(3600), left_words(3601)), ("1m".to_owned(), "2m".to_owned(), "1h".to_owned(), "1h 1m".to_owned()));
+    }
 }

@@ -209,6 +209,11 @@ fn boot_time(name: &std::ffi::CStr) -> Option<i64> {
     (ok && value.tv_sec > 0).then_some(value.tv_sec)
 }
 
+/// When this Mac started, in Unix seconds.
+pub fn booted_at() -> Option<i64> {
+    boot_time(c"kern.boottime")
+}
+
 /// Reads `pmset -g custom`: the battery's timers (`None` without a battery) and the adapter's.
 fn read_timers() -> Option<(Option<Timers>, Timers)> {
     let output = Command::new("/usr/bin/pmset").args(["-g", "custom"]).output().ok()?;

@@ -54,7 +54,7 @@ fn quit_button(l: &Look) -> El {
         .fill(l.chip)
         .hover(l.chip_on)
         .press_scale(0.96)
-        .on_press_tx(|_: &mut Ui, tx| tx.quit())
+        .on_press_tx(ui::quit)
         .child(icon(&icons::POWER, 13.0).color(l.dim))
         .child(text("Quit Nerda Bar").font(font(12.0, 500.0)).color(l.text))
         .child(text("⌘Q").font(font(11.0, 400.0)).color(l.faint))

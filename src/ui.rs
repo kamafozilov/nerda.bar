@@ -1242,6 +1242,14 @@ pub fn set_provider_show_used(s: &mut Ui, provider: Provider, show_used: bool) {
     s.sync_menu_bar();
 }
 
+/// Quits the app. A keep-awake ends with it for good: only one cut short comes back.
+pub fn quit(s: &mut Ui, tx: &mut Tx) {
+    if !s.demo {
+        crate::awake::forget(&s.data_dir);
+    }
+    tx.quit();
+}
+
 pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match &ev.key {
         Key::Escape if s.adding => toggle_adding(s, tx),
@@ -1251,7 +1259,7 @@ pub fn on_key(s: &mut Ui, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape => close(s, tx),
         Key::Command(',') => toggle_settings(s, tx),
         Key::Command('r') => refresh(s),
-        Key::Command('q') => tx.quit(),
+        Key::Command('q') => quit(s, tx),
         // ⌘1: the agents. ⌘2, ⌘3…: the top bar's tabs after it, in its order.
         Key::Command('1') if s.agents_enabled() => show_agents(s, tx),
         Key::Command(c @ '2'..='9') => match s.bar_tabs().get(*c as usize - '2' as usize) {

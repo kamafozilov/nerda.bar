@@ -349,6 +349,8 @@ fn main() {
             ready_handle.update(|s, _| {
                 s.sync_menu_bar();
                 s.sync_system_items();
+                // A keep-awake that an update or a crash cut short picks up where it was.
+                awake::resume(s);
                 awake::sync_item(s);
             });
             cycle(ready_handle.clone());

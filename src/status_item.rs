@@ -175,7 +175,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            self.ivars().app.quit();
+            self.ivars().app.update(ui::quit);
         }
     }
 
